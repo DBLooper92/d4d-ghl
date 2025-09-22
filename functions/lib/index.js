@@ -1,3 +1,4 @@
+// functions/src/index.ts
 import * as functions from "firebase-functions";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
@@ -6,7 +7,17 @@ if (!getApps().length) {
     initializeApp();
 }
 export const exchangeGHLToken = functions
-    .region("us-central1").runWith({ secrets: ["GHL_CLIENT_ID", "GHL_CLIENT_SECRET", "GHL_SHARED_SECRET_KEY", "GHL_REDIRECT_URI", "GHL_WEBHOOK_PUBLIC_KEY", "GHL_SCOPES"] })
+    .region("us-central1")
+    .runWith({
+    secrets: [
+        "GHL_CLIENT_ID",
+        "GHL_CLIENT_SECRET",
+        "GHL_SHARED_SECRET_KEY",
+        "GHL_REDIRECT_URI",
+        "GHL_WEBHOOK_PUBLIC_KEY",
+        "GHL_SCOPES",
+    ],
+})
     .https.onRequest(async (req, res) => {
     try {
         if (req.method !== "POST") {
@@ -40,7 +51,10 @@ export const exchangeGHLToken = functions
         form.set("user_type", user_type);
         const tokenResp = await fetch(tokenUrl, {
             method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                Accept: "application/json",
+            },
             body: form.toString(),
         });
         if (!tokenResp.ok) {
@@ -57,7 +71,11 @@ export const exchangeGHLToken = functions
             redirect_uri,
             response: tokens,
         });
-        res.status(200).json({ id: docRef.id, locationId: tokens.locationId ?? null, scope: tokens.scope ?? null });
+        res.status(200).json({
+            id: docRef.id,
+            locationId: tokens.locationId ?? null,
+            scope: tokens.scope ?? null,
+        });
     }
     catch (e) {
         res.status(500).send(`Exchange error: ${e?.message ?? e}`);
