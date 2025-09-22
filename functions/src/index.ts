@@ -18,7 +18,7 @@ type TokenResponse = {
 };
 
 export const exchangeGHLToken = functions
-  .region("us-central1")
+  .region("us-central1").runWith({ secrets: ["GHL_CLIENT_ID","GHL_CLIENT_SECRET","GHL_SHARED_SECRET_KEY","GHL_REDIRECT_URI","GHL_WEBHOOK_PUBLIC_KEY","GHL_SCOPES"] })
   .https.onRequest(async (req, res) => {
     try {
       if (req.method !== "POST") {
@@ -76,3 +76,4 @@ export const exchangeGHLToken = functions
       res.status(500).send(`Exchange error: ${e?.message ?? e}`);
     }
   });
+
