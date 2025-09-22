@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
   // CSRF state verification (tolerate missing state only if referer looks like GHL)
   const cookies = parseCookie(req.headers.get("cookie"));
   const cookieNonce = cookies["rl_state"] || "";
-  const [nonce, rtB64] = state ? state.split("|") : ["", ""];
+  const [nonce] = state ? state.split("|") : ["", ""];
   const referer = req.headers.get("referer") || "";
   const fromGhl = /gohighlevel\.com|leadconnector/i.test(referer);
 
@@ -35,17 +35,16 @@ export async function GET(req: NextRequest) {
   }
 
   // Build function call
-  const functionsBase =
-    process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL
-    ?? "https://us-central1-driving4dollars-d4d.cloudfunctions.net"; // <= fallback
-
-  const redirectUri = process.env.GHL_REDIRECT_URI!;
-  if (!redirectUri) {
-    return new NextResponse("Missing GHL_REDIRECT_URI", { status: 500 });
+  const functionsBase = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL!;
+  const configuredRedirect = process.env.GHL_REDIRECT_URI?.trim();
+  // Fallback keeps prod working even if secret isn’t visible in this process yet
+  const redirectUri = configuredRedirect || `${req.nextUrl.origin}/api/oauth/callback`;
+  if (!functionsBase) {
+    return new NextResponse("Missing NEXT_PUBLIC_FUNCTIONS_BASE_URL", { status: 500 });
   }
 
   try {
-    // Include user_type=Company to mirror the authorize request
+    // mirror the authorize request
     const url = `${functionsBase}/exchangeGHLToken?code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirectUri)}&user_type=Company`;
     const res = await fetch(url, { method: "POST" });
     if (!res.ok) {

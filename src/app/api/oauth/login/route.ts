@@ -4,11 +4,13 @@ import crypto from "node:crypto";
 
 export async function GET(req: NextRequest) {
   const clientId = process.env.GHL_CLIENT_ID;
-  // IMPORTANT: use the *exact* redirect you registered in GHL, not a computed origin
-  const redirectUri = process.env.GHL_REDIRECT_URI;
-  const scopeStr = process.env.GHL_SCOPES ?? "";
-  if (!clientId || !redirectUri) {
-    return new NextResponse("Missing GHL_CLIENT_ID or GHL_REDIRECT_URI env", { status: 500 });
+  const configuredRedirect = process.env.GHL_REDIRECT_URI?.trim();
+  // Fallback to the current origin so we never error at runtime
+  const redirectUri = configuredRedirect || `${req.nextUrl.origin}/api/oauth/callback`;
+  const scopeStr = (process.env.GHL_SCOPES ?? "").trim().replace(/\s+/g, " ");
+
+  if (!clientId) {
+    return new NextResponse("Missing GHL_CLIENT_ID", { status: 500 });
   }
 
   // CSRF state via nonce cookie
@@ -22,7 +24,7 @@ export async function GET(req: NextRequest) {
     "SameSite=Lax",
   ].join("; ");
 
-  // Optional allow-listed returnTo (only GHL custom-page-link)
+  // Optional allow-listed returnTo (GHL custom-page-link only)
   let safeReturnTo = "";
   const rtRaw = req.nextUrl.searchParams.get("returnTo") || "";
   if (rtRaw) {
@@ -36,12 +38,12 @@ export async function GET(req: NextRequest) {
   const encode = (s: string) => Buffer.from(s, "utf8").toString("base64url");
   const state = [nonce, safeReturnTo ? encode(safeReturnTo) : ""].filter(Boolean).join("|");
 
-  // Build authorize URL (note: /oauth/authorize, not /oauth/chooselocation)
+  // Correct authorize endpoint
   const auth = new URL("https://marketplace.gohighlevel.com/oauth/authorize");
   auth.searchParams.set("response_type", "code");
   auth.searchParams.set("client_id", clientId);
   auth.searchParams.set("redirect_uri", redirectUri);
-  if (scopeStr.trim()) auth.searchParams.set("scope", scopeStr.trim().replace(/\s+/g, " "));
+  if (scopeStr) auth.searchParams.set("scope", scopeStr);
   auth.searchParams.set("user_type", "Company"); // Agency-level install
   auth.searchParams.set("state", state);
 
