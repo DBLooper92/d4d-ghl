@@ -35,11 +35,14 @@ export async function GET(req: NextRequest) {
   }
 
   // Build function call
-  const functionsBase = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL!;
-  const redirectUri   = process.env.GHL_REDIRECT_URI!;
-  if (!functionsBase || !redirectUri) {
-    return new NextResponse("Missing NEXT_PUBLIC_FUNCTIONS_BASE_URL or GHL_REDIRECT_URI", { status: 500 });
-    }
+  const functionsBase =
+    process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL
+    ?? "https://us-central1-driving4dollars-d4d.cloudfunctions.net"; // <= fallback
+
+  const redirectUri = process.env.GHL_REDIRECT_URI!;
+  if (!redirectUri) {
+    return new NextResponse("Missing GHL_REDIRECT_URI", { status: 500 });
+  }
 
   try {
     // Include user_type=Company to mirror the authorize request
