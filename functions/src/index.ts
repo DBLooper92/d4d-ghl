@@ -40,17 +40,19 @@ export const exchangeGHLToken = functions
       }
 
       // Exchange code -> tokens
-      const tokenUrl = "https://services.leadconnectorhq.com/oauth/token";
+      const tokenUrl = "https://services.leadconnectorhq.com/oauth/token"; console.log("[exchange] using client_id:", (client_id||"").slice(0,6)+"..."+(client_id||"").slice(-4)); console.log("[exchange] redirect_uri:", redirect_uri); console.log("[exchange] code:", (code||"").slice(0,12)+"...");
+      const user_type = (req.query.user_type as string) || (req.body?.user_type as string) || "Company";
       const form = new URLSearchParams();
       form.set("grant_type", "authorization_code");
       form.set("code", code);
       form.set("client_id", client_id);
       form.set("client_secret", client_secret);
       form.set("redirect_uri", redirect_uri);
+      form.set("user_type", user_type);
 
       const tokenResp = await fetch(tokenUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
         body: form.toString(),
       });
 
@@ -76,4 +78,5 @@ export const exchangeGHLToken = functions
       res.status(500).send(`Exchange error: ${e?.message ?? e}`);
     }
   });
+
 
