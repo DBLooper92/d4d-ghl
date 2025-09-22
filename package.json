@@ -1,7 +1,25 @@
 {
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "eslint": "^9.36.0",
+    "eslint-config-next": "^15.5.3",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.13"
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2"
+  },
+  "name": "d4d-ghl",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^15.5.3",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
   }
 }
