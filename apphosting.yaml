@@ -1,0 +1,53 @@
+# apphosting.yaml
+
+# (Optional) Cloud Run sizing — safe defaults
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
+
+# Environment variables & secrets
+env:
+  # Public var used by your Next.js client and server
+  - variable: NEXT_PUBLIC_FUNCTIONS_BASE_URL
+    value: https://us-central1-driving4dollars-d4d.cloudfunctions.net
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # Exact redirect URI registered in GHL (you already set the secret value)
+  - variable: GHL_REDIRECT_URI
+    secret: GHL_REDIRECT_URI
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # GHL secrets (already created)
+  - variable: GHL_CLIENT_ID
+    secret: GHL_CLIENT_ID
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: GHL_CLIENT_SECRET
+    secret: GHL_CLIENT_SECRET
+    availability:
+      - RUNTIME
+
+  - variable: GHL_SCOPES
+    secret: GHL_SCOPES
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: GHL_SHARED_SECRET_KEY
+    secret: GHL_SHARED_SECRET_KEY
+    availability:
+      - RUNTIME
+
+  - variable: GHL_WEBHOOK_PUBLIC_KEY
+    secret: GHL_WEBHOOK_PUBLIC_KEY
+    availability:
+      - RUNTIME

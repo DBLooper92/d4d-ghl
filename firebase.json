@@ -1,1 +1,17 @@
-{"functions":{"source":"functions","runtime":"nodejs20"}}
+{
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs20"
+  },
+  "apphosting": {
+    "backendId": "web-app",
+    "rootDir": "/",
+    "ignore": [
+      "node_modules",
+      ".git",
+      "firebase-debug.log",
+      "firebase-debug.*.log",
+      "functions"
+    ]
+  }
+}
