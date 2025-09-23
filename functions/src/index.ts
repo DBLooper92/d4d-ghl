@@ -16,6 +16,7 @@ type TokenResponse = {
   refresh_token?: string;
   scope?: string;
   locationId?: string;
+  companyId?: string; // GHL may return this on agency installs
   [key: string]: any;
 };
 
@@ -43,6 +44,7 @@ export const exchangeGHLToken = functions
 
       const code = (req.query.code as string) || (req.body?.code as string);
       const redirect_uri = ((req.query.redirect_uri as string) || (req.body?.redirect_uri as string) || "").trim();
+      // NOTE: user_type is optional; tokens.locationId is the truthy discriminator
       const user_type = ((req.query.user_type as string) || (req.body?.user_type as string) || "Company").trim();
 
       if (!code || !redirect_uri) {
@@ -50,14 +52,13 @@ export const exchangeGHLToken = functions
         return;
       }
 
-      // IMPORTANT: trim to strip stray spaces/newlines from Secret Manager values
       const client_id = (process.env.GHL_CLIENT_ID || "").trim();
       const client_secret = (process.env.GHL_CLIENT_SECRET || "").trim();
 
       console.log("[exchange] fp client_id:", sha12(client_id));
       console.log("[exchange] fp redirect_env:", sha12((process.env.GHL_REDIRECT_URI || "").trim()));
       console.log("[exchange] fp redirect_sent:", sha12(redirect_uri));
-      console.log("[exchange] user_type:", user_type);
+      console.log("[exchange] user_type (hint):", user_type);
 
       if (!client_id || !client_secret) {
         res.status(500).send("Missing GHL client credentials in env");
@@ -76,7 +77,7 @@ export const exchangeGHLToken = functions
       form.set("client_id", client_id);
       form.set("client_secret", client_secret);
       form.set("redirect_uri", redirect_uri);
-      form.set("user_type", user_type);
+      form.set("user_type", user_type); // Not strictly required, but fine to send
 
       const tokenResp = await fetch(tokenUrl, {
         method: "POST",
@@ -95,22 +96,37 @@ export const exchangeGHLToken = functions
 
       const tokens = (await tokenResp.json()) as TokenResponse;
 
+      // Log what we got back (non-sensitive fields)
+      console.log("[exchange] tokens.locationId:", tokens.locationId || "(none)");
+      console.log("[exchange] tokens.scope:", tokens.scope || "(none)");
+
       // Persist deterministic record: agency_<first6(client_id)> OR loc_<locationId>
       const db = getFirestore();
-      const userType = user_type as "Company" | "Location";
-      const docId = tokens.locationId
+      const isLocation = Boolean(tokens.locationId);
+      const docId = isLocation
         ? `loc_${tokens.locationId}`
         : `agency_${(client_id || "").slice(0, 6)}`;
 
       await db.collection("ghlTokens").doc(docId).set(
         {
           createdAt: Timestamp.now(),
-          userType,
+          userType: isLocation ? ("Location" as const) : ("Company" as const),
           redirect_uri,
           response: tokens,
         },
         { merge: true }
       );
+
+      // Optional: for visibility, also keep/refresh an agency doc when we have location installs
+      if (isLocation) {
+        const agencyDocId = `agency_${(client_id || "").slice(0, 6)}`;
+        await db.collection("ghlTokens").doc(agencyDocId).set(
+          {
+            lastLocationLinkedAt: Timestamp.now(),
+          },
+          { merge: true }
+        );
+      }
 
       res.status(200).json({
         id: docId,
