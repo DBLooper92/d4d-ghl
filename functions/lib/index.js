@@ -2,7 +2,7 @@
 import * as functions from "firebase-functions";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
-import crypto from "node:crypto"; // <-- ESM import (fixes "require is not defined")
+import crypto from "node:crypto"; // ESM import
 // Initialize Admin SDK (default credentials in Firebase environment)
 if (!getApps().length) {
     initializeApp();
@@ -26,22 +26,21 @@ export const exchangeGHLToken = functions
             return;
         }
         const code = req.query.code || req.body?.code;
-        const redirect_uri = req.query.redirect_uri || req.body?.redirect_uri;
+        const redirect_uri = (req.query.redirect_uri || req.body?.redirect_uri || "").trim();
         if (!code || !redirect_uri) {
             res.status(400).send("Missing code or redirect_uri");
             return;
         }
-        const client_id = process.env.GHL_CLIENT_ID || "";
-        const client_secret = process.env.GHL_CLIENT_SECRET || "";
+        // IMPORTANT: trim to strip stray spaces/newlines from Secret Manager values
+        const client_id = (process.env.GHL_CLIENT_ID || "").trim();
+        const client_secret = (process.env.GHL_CLIENT_SECRET || "").trim();
         // Read user_type BEFORE logging it
-        const user_type = req.query.user_type ||
-            req.body?.user_type ||
-            "Company";
+        const user_type = (req.query.user_type || req.body?.user_type || "Company").trim();
         // Small helper for short fingerprints in logs (non-sensitive)
-        const sha = (s) => crypto.createHash("sha256").update(s).digest("hex").slice(0, 12);
-        console.log("[exchange] fp client_id:", sha(client_id));
-        console.log("[exchange] fp redirect_env:", sha(process.env.GHL_REDIRECT_URI || ""));
-        console.log("[exchange] fp redirect_sent:", sha(redirect_uri || ""));
+        const sha12 = (s) => crypto.createHash("sha256").update(s).digest("hex").slice(0, 12);
+        console.log("[exchange] fp client_id:", sha12(client_id));
+        console.log("[exchange] fp redirect_env:", sha12((process.env.GHL_REDIRECT_URI || "").trim()));
+        console.log("[exchange] fp redirect_sent:", sha12(redirect_uri));
         console.log("[exchange] user_type:", user_type);
         if (!client_id || !client_secret) {
             res.status(500).send("Missing GHL client credentials in env");

@@ -1,38 +1,75 @@
-﻿// src/app/api/oauth/callback/route.ts
+﻿// File: src/app/api/oauth/callback/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-function parseCookie(header: string | null): Record<string,string> {
-  const out: Record<string,string> = {};
+function parseCookie(headerInput: string | null | undefined): Record<string, string> {
+  const header = headerInput ?? "";
+  const out: Record<string, string> = {};
   if (!header) return out;
+
   for (const part of header.split(";")) {
-    const [k,v] = part.split("=").map(s => s.trim());
-    if (k) out[k] = v ?? "";
+    const [kRaw, vRaw] = part.split("=", 2);
+    const k: string = (kRaw ?? "").trim();
+    const v: string = (vRaw ?? "").trim();
+    if (k) out[k] = v;
   }
   return out;
 }
 
 function parseUserTypeFromState(state: string): "Company" | "Location" {
   // state format from login: nonce | base64url(returnTo?) | ut=Company|Location
-  const parts = state.split("|").map(s => s.trim()).filter(Boolean);
-  const ut = parts.find(p => p.startsWith("ut=")) || "";
+  const parts = state.split("|").map((s) => s.trim()).filter(Boolean);
+  const ut = parts.find((p) => p.startsWith("ut=")) || "";
   const v = ut.split("=")[1] || "";
   return v === "Location" ? "Location" : "Company";
 }
 
+function safeReturnFromState(state: string): string {
+  // state format: nonce | base64url(returnTo?) | ut=...
+  try {
+    const parts = state.split("|").map((s) => s.trim()).filter(Boolean);
+
+    // The returnTo (if present) is the second segment and is base64url-encoded.
+    if (parts.length >= 2) {
+      // parts[1] may be undefined in some cases per TypeScript's analysis; allow that
+      const maybeEncoded: string | undefined = parts[1];
+      if (maybeEncoded && !maybeEncoded.startsWith("ut=")) {
+        const decoded = Buffer.from(maybeEncoded, "base64url").toString("utf8");
+
+        const u = new URL(decoded);
+        const hostname = u.hostname.toLowerCase();
+
+        const isGhl =
+          hostname === "app.gohighlevel.com" &&
+          u.pathname.startsWith("/custom-page-link/");
+
+        const isOwn =
+          hostname.endsWith("drivehound.com") ||
+          hostname.endsWith("driving4dollars-d4d.us-central1.hosted.app");
+
+        if (isGhl || isOwn) return decoded;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return "/";
+}
+
 export async function GET(req: NextRequest) {
-  const error = req.nextUrl.searchParams.get("error");
-  const code  = req.nextUrl.searchParams.get("code") || "";
-  const state = req.nextUrl.searchParams.get("state") || "";
-  const debug = req.nextUrl.searchParams.get("debug") === "1";
+  // Coerce all possibly-null values to concrete strings immediately
+  const error: string = req.nextUrl.searchParams.get("error") ?? "";
+  const code: string = req.nextUrl.searchParams.get("code") ?? "";
+  const state: string = req.nextUrl.searchParams.get("state") ?? "";
+  const debug: boolean = (req.nextUrl.searchParams.get("debug") ?? "") === "1";
 
   if (error) return new NextResponse(`OAuth error: ${error}`, { status: 400 });
-  if (!code)  return new NextResponse("Missing ?code", { status: 400 });
+  if (!code) return new NextResponse("Missing ?code", { status: 400 });
 
   // CSRF state verification (tolerate missing state only if referer looks like GHL)
   const cookies = parseCookie(req.headers.get("cookie"));
-  const cookieNonce = cookies["rl_state"] || "";
+  const cookieNonce: string = cookies["rl_state"] ?? "";
   const [nonce] = state ? state.split("|") : ["", ""];
-  const referer = req.headers.get("referer") || "";
+  const referer: string = req.headers.get("referer") ?? "";
   const fromGhl = /gohighlevel\.com|leadconnector/i.test(referer);
 
   if (state) {
@@ -43,13 +80,16 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Invalid state", { status: 400 });
   }
 
-  const userType = parseUserTypeFromState(state); // <- recovered from state
+  const userType = parseUserTypeFromState(state);
 
-  const functionsBase = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL?.trim();
-  const redirectUri = process.env.GHL_REDIRECT_URI?.trim();
+  // Coerce envs to strings now so they are never string|undefined later
+  const functionsBase: string = (process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ?? "").trim();
+  const redirectUri: string = (process.env.GHL_REDIRECT_URI ?? "").trim();
 
-  if (!functionsBase) return new NextResponse("Missing NEXT_PUBLIC_FUNCTIONS_BASE_URL", { status: 500 });
-  if (!redirectUri)   return new NextResponse("Missing GHL_REDIRECT_URI", { status: 500 });
+  if (!functionsBase)
+    return new NextResponse("Missing NEXT_PUBLIC_FUNCTIONS_BASE_URL", { status: 500 });
+  if (!redirectUri)
+    return new NextResponse("Missing GHL_REDIRECT_URI", { status: 500 });
 
   const exchangeUrl =
     `${functionsBase}/exchangeGHLToken?` +
@@ -65,7 +105,7 @@ export async function GET(req: NextRequest) {
         GHL_REDIRECT_URI: redirectUri,
         NEXT_PUBLIC_FUNCTIONS_BASE_URL: functionsBase,
         user_type: userType,
-      }
+      },
     });
   }
 
@@ -73,11 +113,24 @@ export async function GET(req: NextRequest) {
     const res = await fetch(exchangeUrl, { method: "POST" });
     if (!res.ok) {
       const text = await res.text();
-      return new NextResponse(`Token exchange failed: ${res.status} ${text}`, { status: 502 });
+      return new NextResponse(`Token exchange failed: ${res.status} ${text}`, {
+        status: 502,
+      });
     }
-    const data = await res.json();
-    return NextResponse.json({ message: "Success! Tokens stored.", data }, { status: 200 });
+
+    // Redirect back to a friendly page: either the encoded returnTo or app root
+    const returnTo = safeReturnFromState(state);
+    const response = NextResponse.redirect(returnTo, { status: 302 });
+
+    // Nuke the one-time state cookie
+    response.headers.append(
+      "Set-Cookie",
+      "rl_state=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax"
+    );
+    return response;
   } catch (e: any) {
-    return new NextResponse(`Token exchange error: ${e?.message ?? e}`, { status: 500 });
+    return new NextResponse(`Token exchange error: ${e?.message ?? e}`, {
+      status: 500,
+    });
   }
 }
