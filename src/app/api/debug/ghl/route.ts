@@ -1,26 +1,32 @@
-// src/app/api/debug/ghl/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import crypto from "node:crypto";
 
-export function GET(req: NextRequest) {
-  const clientId = process.env.GHL_CLIENT_ID?.trim() || "";
-  const redirectUri = process.env.GHL_REDIRECT_URI?.trim() || "";
-  const scopes = (process.env.GHL_SCOPES ?? "").trim().replace(/\s+/g, " ");
-  const functionsBase = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL?.trim() || "";
+function fp(s?: string) {
+  return s ? crypto.createHash("sha256").update(s).digest("hex").slice(0, 12) : "(empty)";
+}
+
+export async function GET() {
+  const envClient = process.env.GHL_CLIENT_ID || "";
+  const envRedirect = process.env.GHL_REDIRECT_URI || "";
+  const envScopes = (process.env.GHL_SCOPES || "").trim().replace(/\s+/g, " ");
 
   const auth = new URL("https://marketplace.gohighlevel.com/oauth/authorize");
   auth.searchParams.set("response_type", "code");
-  if (clientId) auth.searchParams.set("client_id", clientId);
-  if (redirectUri) auth.searchParams.set("redirect_uri", redirectUri);
-  if (scopes) auth.searchParams.set("scope", scopes);
+  auth.searchParams.set("client_id", envClient);
+  auth.searchParams.set("redirect_uri", envRedirect);
+  if (envScopes) auth.searchParams.set("scope", envScopes);
   auth.searchParams.set("user_type", "Company");
 
   return NextResponse.json({
-    GHL_CLIENT_ID: clientId,
-    GHL_REDIRECT_URI: redirectUri,
-    GHL_SCOPES: scopes,
-    NEXT_PUBLIC_FUNCTIONS_BASE_URL: functionsBase,
+    GHL_CLIENT_ID: envClient,
+    GHL_REDIRECT_URI: envRedirect,
+    GHL_SCOPES: envScopes,
+    NEXT_PUBLIC_FUNCTIONS_BASE_URL: process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL,
+    fp: {
+      apphosting_client_id_sha256_12: fp(envClient),
+      apphosting_redirect_sha256_12: fp(envRedirect),
+    },
     constructed_authorize_url: auth.toString(),
-    notes:
-      "All values come from App Hosting secrets/vars. The authorize URL above is exactly what /api/oauth/login should redirect to.",
+    notes: "Fingerprints come from App Hosting env."
   });
 }

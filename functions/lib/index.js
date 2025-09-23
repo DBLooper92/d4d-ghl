@@ -2,6 +2,7 @@
 import * as functions from "firebase-functions";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
+import crypto from "node:crypto"; // <-- ESM import (fixes "require is not defined")
 // Initialize Admin SDK (default credentials in Firebase environment)
 if (!getApps().length) {
     initializeApp();
@@ -30,8 +31,18 @@ export const exchangeGHLToken = functions
             res.status(400).send("Missing code or redirect_uri");
             return;
         }
-        const client_id = process.env.GHL_CLIENT_ID;
-        const client_secret = process.env.GHL_CLIENT_SECRET;
+        const client_id = process.env.GHL_CLIENT_ID || "";
+        const client_secret = process.env.GHL_CLIENT_SECRET || "";
+        // Read user_type BEFORE logging it
+        const user_type = req.query.user_type ||
+            req.body?.user_type ||
+            "Company";
+        // Small helper for short fingerprints in logs (non-sensitive)
+        const sha = (s) => crypto.createHash("sha256").update(s).digest("hex").slice(0, 12);
+        console.log("[exchange] fp client_id:", sha(client_id));
+        console.log("[exchange] fp redirect_env:", sha(process.env.GHL_REDIRECT_URI || ""));
+        console.log("[exchange] fp redirect_sent:", sha(redirect_uri || ""));
+        console.log("[exchange] user_type:", user_type);
         if (!client_id || !client_secret) {
             res.status(500).send("Missing GHL client credentials in env");
             return;
@@ -41,7 +52,6 @@ export const exchangeGHLToken = functions
         console.log("[exchange] using client_id:", (client_id || "").slice(0, 6) + "..." + (client_id || "").slice(-4));
         console.log("[exchange] redirect_uri:", redirect_uri);
         console.log("[exchange] code:", (code || "").slice(0, 12) + "...");
-        const user_type = req.query.user_type || req.body?.user_type || "Company";
         const form = new URLSearchParams();
         form.set("grant_type", "authorization_code");
         form.set("code", code);
