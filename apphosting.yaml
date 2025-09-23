@@ -10,8 +10,14 @@ runConfig:
 
 # Environment variables & secrets
 env:
+  - variable: NEXT_PUBLIC_FUNCTIONS_BASE_URL
+    value: https://us-central1-driving4dollars-d4d.cloudfunctions.net
+    availability:
+      - BUILD
+      - RUNTIME
+
   - variable: NEXT_PUBLIC_APP_BASE_URL
-    value: https://app.drivehound.com
+    value: https://app.drivehound.com    # or your App Hosting domain
     availability:
       - BUILD
       - RUNTIME
