@@ -10,9 +10,8 @@ runConfig:
 
 # Environment variables & secrets
 env:
-  # Public var used by your Next.js client and server
-  - variable: NEXT_PUBLIC_FUNCTIONS_BASE_URL
-    value: https://us-central1-driving4dollars-d4d.cloudfunctions.net
+  - variable: NEXT_PUBLIC_APP_BASE_URL
+    value: https://app.drivehound.com
     availability:
       - BUILD
       - RUNTIME
