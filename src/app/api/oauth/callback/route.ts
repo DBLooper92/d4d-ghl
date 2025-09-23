@@ -11,10 +11,19 @@ function parseCookie(header: string | null): Record<string,string> {
   return out;
 }
 
+function parseUserTypeFromState(state: string): "Company" | "Location" {
+  // state format from login: nonce | base64url(returnTo?) | ut=Company|Location
+  const parts = state.split("|").map(s => s.trim()).filter(Boolean);
+  const ut = parts.find(p => p.startsWith("ut=")) || "";
+  const v = ut.split("=")[1] || "";
+  return v === "Location" ? "Location" : "Company";
+}
+
 export async function GET(req: NextRequest) {
   const error = req.nextUrl.searchParams.get("error");
   const code  = req.nextUrl.searchParams.get("code") || "";
   const state = req.nextUrl.searchParams.get("state") || "";
+  const debug = req.nextUrl.searchParams.get("debug") === "1";
 
   if (error) return new NextResponse(`OAuth error: ${error}`, { status: 400 });
   if (!code)  return new NextResponse("Missing ?code", { status: 400 });
@@ -34,19 +43,34 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Invalid state", { status: 400 });
   }
 
-  // Build function call
-  const functionsBase = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL!;
-  const configuredRedirect = process.env.GHL_REDIRECT_URI?.trim();
-  // Fallback keeps prod working even if secret isn’t visible in this process yet
-  const redirectUri = configuredRedirect || `${req.nextUrl.origin}/api/oauth/callback`;
-  if (!functionsBase) {
-    return new NextResponse("Missing NEXT_PUBLIC_FUNCTIONS_BASE_URL", { status: 500 });
+  const userType = parseUserTypeFromState(state); // <- recovered from state
+
+  const functionsBase = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL?.trim();
+  const redirectUri = process.env.GHL_REDIRECT_URI?.trim();
+
+  if (!functionsBase) return new NextResponse("Missing NEXT_PUBLIC_FUNCTIONS_BASE_URL", { status: 500 });
+  if (!redirectUri)   return new NextResponse("Missing GHL_REDIRECT_URI", { status: 500 });
+
+  const exchangeUrl =
+    `${functionsBase}/exchangeGHLToken?` +
+    `code=${encodeURIComponent(code)}&` +
+    `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+    `user_type=${encodeURIComponent(userType)}`;
+
+  if (debug) {
+    return NextResponse.json({
+      message: "DEBUG ONLY — not exchanging tokens",
+      will_call: exchangeUrl,
+      env: {
+        GHL_REDIRECT_URI: redirectUri,
+        NEXT_PUBLIC_FUNCTIONS_BASE_URL: functionsBase,
+        user_type: userType,
+      }
+    });
   }
 
   try {
-    // mirror the authorize request
-    const url = `${functionsBase}/exchangeGHLToken?code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirectUri)}&user_type=Company`;
-    const res = await fetch(url, { method: "POST" });
+    const res = await fetch(exchangeUrl, { method: "POST" });
     if (!res.ok) {
       const text = await res.text();
       return new NextResponse(`Token exchange failed: ${res.status} ${text}`, { status: 502 });
