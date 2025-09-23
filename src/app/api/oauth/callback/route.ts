@@ -30,7 +30,6 @@ function safeReturnFromState(state: string): string {
 
     // The returnTo (if present) is the second segment and is base64url-encoded.
     if (parts.length >= 2) {
-      // parts[1] may be undefined in some cases per TypeScript's analysis; allow that
       const maybeEncoded: string | undefined = parts[1];
       if (maybeEncoded && !maybeEncoded.startsWith("ut=")) {
         const decoded = Buffer.from(maybeEncoded, "base64url").toString("utf8");
@@ -52,7 +51,19 @@ function safeReturnFromState(state: string): string {
   } catch {
     // ignore
   }
-  return "/";
+  return "/"; // relative fallback (we'll absolutize it below)
+}
+
+function toAbsoluteUrl(urlish: string, origin: string): string {
+  try {
+    // If it's already absolute, this will succeed.
+    // eslint-disable-next-line no-new
+    new URL(urlish);
+    return urlish;
+  } catch {
+    // Make it absolute against our origin.
+    return new URL(urlish, origin).toString();
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -68,7 +79,9 @@ export async function GET(req: NextRequest) {
   // CSRF state verification (tolerate missing state only if referer looks like GHL)
   const cookies = parseCookie(req.headers.get("cookie"));
   const cookieNonce: string = cookies["rl_state"] ?? "";
-  const [nonce] = state ? state.split("|") : ["", ""];
+
+  // Avoid destructuring (keeps types concrete)
+  const nonce: string = state ? (state.split("|")[0] ?? "") : "";
   const referer: string = req.headers.get("referer") ?? "";
   const fromGhl = /gohighlevel\.com|leadconnector/i.test(referer);
 
@@ -82,7 +95,7 @@ export async function GET(req: NextRequest) {
 
   const userType = parseUserTypeFromState(state);
 
-  // Coerce envs to strings now so they are never string|undefined later
+  // Env
   const functionsBase: string = (process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ?? "").trim();
   const redirectUri: string = (process.env.GHL_REDIRECT_URI ?? "").trim();
 
@@ -110,17 +123,20 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const res = await fetch(exchangeUrl, { method: "POST" });
-    if (!res.ok) {
-      const text = await res.text();
-      return new NextResponse(`Token exchange failed: ${res.status} ${text}`, {
+    const r = await fetch(exchangeUrl, { method: "POST" });
+    if (!r.ok) {
+      const text = await r.text();
+      return new NextResponse(`Token exchange failed: ${r.status} ${text}`, {
         status: 502,
       });
     }
 
-    // Redirect back to a friendly page: either the encoded returnTo or app root
-    const returnTo = safeReturnFromState(state);
-    const response = NextResponse.redirect(returnTo, { status: 302 });
+    // Build an ABSOLUTE redirect target
+    const origin = req.nextUrl.origin; // e.g., https://app.drivehound.com or your App Hosting domain
+    const returnToRelativeOrAbsolute = safeReturnFromState(state);
+    const redirectAbsolute = toAbsoluteUrl(returnToRelativeOrAbsolute, origin);
+
+    const response = NextResponse.redirect(redirectAbsolute, { status: 302 });
 
     // Nuke the one-time state cookie
     response.headers.append(
