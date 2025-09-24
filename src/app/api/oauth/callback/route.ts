@@ -22,6 +22,17 @@ function parseUserTypeFromState(state: string): "Company" | "Location" {
   return v === "Location" ? "Location" : "Company";
 }
 
+/** Prefer provider query (?user_type / ?userType) then fall back to state hint. */
+function pickUserType(req: NextRequest, state: string): "Company" | "Location" {
+  const qp =
+    (req.nextUrl.searchParams.get("user_type") ??
+      req.nextUrl.searchParams.get("userType") ??
+      "").trim();
+  if (qp === "Location") return "Location";
+  if (qp === "Company") return "Company";
+  return parseUserTypeFromState(state);
+}
+
 function safeReturnFromState(state: string): string {
   // state format: nonce | base64url(returnTo?) | ut=...
   try {
@@ -95,7 +106,8 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Invalid state", { status: 400 });
   }
 
-  const userType = parseUserTypeFromState(state);
+  // 🔑 Decides correctly for location installs
+  const userType = pickUserType(req, state);
 
   const functionsBase: string = (process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ?? "").trim();
   const redirectUri: string = (process.env.GHL_REDIRECT_URI ?? "").trim();
@@ -116,7 +128,8 @@ export async function GET(req: NextRequest) {
       env: {
         GHL_REDIRECT_URI: redirectUri,
         NEXT_PUBLIC_FUNCTIONS_BASE_URL: functionsBase,
-        user_type: userType,
+        user_type_from_query: req.nextUrl.searchParams.get("user_type") ?? req.nextUrl.searchParams.get("userType"),
+        user_type_final: userType,
       },
     });
   }
