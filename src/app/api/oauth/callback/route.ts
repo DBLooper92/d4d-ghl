@@ -5,7 +5,6 @@ function parseCookie(headerInput: string | null | undefined): Record<string, str
   const header = headerInput ?? "";
   const out: Record<string, string> = {};
   if (!header) return out;
-
   for (const part of header.split(";")) {
     const [kRaw, vRaw] = part.split("=", 2);
     const k: string = (kRaw ?? "").trim();
@@ -22,15 +21,14 @@ function parseUserTypeFromState(state: string): "Company" | "Location" {
   return v === "Location" ? "Location" : "Company";
 }
 
-/** Prefer provider query (?user_type / ?userType) then fall back to state hint. */
-function pickUserType(req: NextRequest, state: string): "Company" | "Location" {
+/** IMPORTANT: Trust state first; fallback to provider query only if no state. */
+function decideUserType(req: NextRequest, state: string): "Company" | "Location" {
+  if (state) return parseUserTypeFromState(state);
   const qp =
     (req.nextUrl.searchParams.get("user_type") ??
       req.nextUrl.searchParams.get("userType") ??
       "").trim();
-  if (qp === "Location") return "Location";
-  if (qp === "Company") return "Company";
-  return parseUserTypeFromState(state);
+  return qp === "Location" ? "Location" : "Company";
 }
 
 function safeReturnFromState(state: string): string {
@@ -106,8 +104,8 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Invalid state", { status: 400 });
   }
 
-  // 🔑 Decides correctly for location installs
-  const userType = pickUserType(req, state);
+  // ✅ This now matches your reference behavior for correctly separating account types
+  const userType = decideUserType(req, state);
 
   const functionsBase: string = (process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ?? "").trim();
   const redirectUri: string = (process.env.GHL_REDIRECT_URI ?? "").trim();
