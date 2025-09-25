@@ -1,0 +1,1 @@
+﻿export async function GET(){const env:any={};for(const [k,v] of Object.entries(process.env)){if(k.startsWith("NEXT_PUBLIC_")) env[k]=v}return new Response(JSON.stringify(env,null,2),{status:200,headers:{"Content-Type":"application/json"}})}
