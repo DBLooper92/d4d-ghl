@@ -52,7 +52,6 @@ function isObj(v: unknown): v is Record<string, unknown> {
 }
 function isAnyLoc(v: unknown): v is AnyLoc {
   if (!isObj(v)) return false;
-  // at least one id-ish key should be present to count it as a location-ish object
   return "id" in v || "locationId" in v || "_id" in v;
 }
 function safeId(l: AnyLoc): string | null {
@@ -71,11 +70,17 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
 
-  // Keep for logging only; do NOT use for logic
-  const userTypeQuery =
+  // What GHL says it is installing *to* (Company | Location). We’ll pass this through to the token exchange.
+  const userTypeQueryRaw =
     url.searchParams.get("user_type") ||
     url.searchParams.get("userType") ||
     "";
+  const userTypeForToken =
+    userTypeQueryRaw.toLowerCase() === "location"
+      ? ("Location" as const)
+      : userTypeQueryRaw.toLowerCase() === "company"
+      ? ("Company" as const)
+      : undefined;
 
   const state = url.searchParams.get("state") || "";
   const [nonce, rtB64] = state ? state.split("|") : ["", ""];
@@ -103,17 +108,20 @@ export async function GET(request: Request) {
   const { clientId, clientSecret, redirectUri, baseApp } = getGhlConfig();
 
   // 1) Exchange code → tokens
-  // IMPORTANT: Do NOT send user_type; trust the token payload instead.
+  // IMPORTANT: Send user_type exactly as provided by GHL so a Location install returns a location token.
+  const form = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+  });
+  if (userTypeForToken) form.set("user_type", userTypeForToken);
+
   const tokenResp = await fetch(ghlTokenUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-    }),
+    body: form,
   });
 
   const raw = await tokenResp.text();
@@ -133,7 +141,14 @@ export async function GET(request: Request) {
   const locationId = tokens.locationId || null;
   const scopeArr = (tokens.scope || "").split(" ").filter(Boolean);
 
-  // Authoritative install target derived from the token payload
+  // Debug (safe): visibility only, no secrets
+  olog("token snapshot", {
+    userTypeForToken: userTypeForToken ?? "(none)",
+    hasCompanyId: !!agencyId,
+    hasLocationId: !!locationId,
+  });
+
+  // Derive install target; token payload is authoritative
   type InstallationTarget = "Company" | "Location";
   const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
@@ -202,7 +217,6 @@ export async function GET(request: Request) {
   // 4) If Agency-level install, snapshot/relate locations and mint per-location tokens
   try {
     if (agencyId && installationTarget === "Company") {
-      // Use agency access token to list all locations
       const locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
       const limit = 200;
       for (let page = 1; page < 999; page++) {
@@ -219,11 +233,9 @@ export async function GET(request: Request) {
           if (!id) continue;
           locs.push({ id, name: safeName(e), isInstalled: safeInstalled(e) });
         }
-        // stop when < limit returned
         if (arr.length < limit) break;
       }
 
-      // Persist each location with back-reference to agency
       const batch = db().batch();
       const now = FieldValue.serverTimestamp();
       for (const l of locs) {
@@ -243,7 +255,7 @@ export async function GET(request: Request) {
       }
       await batch.commit();
 
-      // Mint & persist location refresh tokens (best-effort)
+      // Mint per-location refresh tokens (best-effort)
       for (const l of locs) {
         const resp = await fetch(ghlMintLocationTokenUrl(), {
           method: "POST",
@@ -282,8 +294,8 @@ export async function GET(request: Request) {
   if (locationId) ui.searchParams.set("locationId", locationId);
 
   olog("oauth success", {
-    userTypeQuery,                          // what the URL said (not trusted)
-    derivedInstallTarget: installationTarget, // what the token proves
+    userTypeQuery: userTypeForToken ?? "",
+    derivedInstallTarget: installationTarget,
     agencyId,
     locationId,
     scopes: scopeArr.slice(0, 8),
