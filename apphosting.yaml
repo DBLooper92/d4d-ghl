@@ -1,4 +1,4 @@
-# Minimal App Hosting config for a Next.js app
+# File: apphosting.yaml
 runConfig:
   minInstances: 0
   maxInstances: 10
@@ -6,4 +6,24 @@ runConfig:
   cpu: 1
   memoryMiB: 512
 
-env: []
+env:
+  # Static env values
+  - variable: NEXT_PUBLIC_APP_BASE_URL
+    value: https://app.driving4dollars.co
+  - variable: OAUTH_LOG
+    value: on   # toggle to "off" to silence OAuth logs
+
+  # Secret bindings → environment variables
+  - variable: GHL_CLIENT_ID
+    secret: GHL_CLIENT_ID
+  - variable: GHL_CLIENT_SECRET
+    secret: GHL_CLIENT_SECRET
+  - variable: GHL_SHARED_SECRET_KEY
+    secret: GHL_SHARED_SECRET_KEY
+  - variable: GHL_WEBHOOK_PUBLIC_KEY
+    secret: GHL_WEBHOOK_PUBLIC_KEY
+  - variable: GHL_SCOPES
+    secret: GHL_SCOPES
+  - variable: GHL_REDIRECT_PATH
+    # we also have this as a literal, but binding keeps it consistent
+    value: /api/oauth/callback
