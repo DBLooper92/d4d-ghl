@@ -14,6 +14,11 @@ pnpm dev
 bun dev
 ```
 
+## Endpoints
+- `/api/health` — uptime check
+- `/api/public-env` — exposes `NEXT_PUBLIC_*` vars only
+- `/api/version` — returns app name & version from `package.json`
+
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
