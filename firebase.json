@@ -1,6 +1,6 @@
 {
   "apphosting": {
-    "backendId": "web-app",
+    "backendId": "ghl",
     "rootDir": "/",
     "ignore": [
       "node_modules",
