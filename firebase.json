@@ -1,0 +1,13 @@
+{
+  "apphosting": {
+    "backendId": "web-app",
+    "rootDir": "/",
+    "ignore": [
+      "node_modules",
+      ".git",
+      "firebase-debug.log",
+      "firebase-debug.*.log"
+    ],
+    "alwaysDeployFromSource": true
+  }
+}
