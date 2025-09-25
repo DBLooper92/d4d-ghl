@@ -8,7 +8,6 @@ import {
   lcHeaders,
   OAuthTokens,
   olog,
-  isCompany,
   ghlCompanyLocationsUrl,
   ghlMintLocationTokenUrl,
 } from "@/lib/ghl";
@@ -71,10 +70,12 @@ function safeInstalled(l: AnyLoc): boolean {
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
-  const userType =
+
+  // Keep for logging only; do NOT use for logic
+  const userTypeQuery =
     url.searchParams.get("user_type") ||
     url.searchParams.get("userType") ||
-    "Company";
+    "";
 
   const state = url.searchParams.get("state") || "";
   const [nonce, rtB64] = state ? state.split("|") : ["", ""];
@@ -102,6 +103,7 @@ export async function GET(request: Request) {
   const { clientId, clientSecret, redirectUri, baseApp } = getGhlConfig();
 
   // 1) Exchange code → tokens
+  // IMPORTANT: Do NOT send user_type; trust the token payload instead.
   const tokenResp = await fetch(ghlTokenUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
@@ -111,7 +113,6 @@ export async function GET(request: Request) {
       client_id: clientId,
       client_secret: clientSecret,
       redirect_uri: redirectUri,
-      user_type: userType,
     }),
   });
 
@@ -131,6 +132,10 @@ export async function GET(request: Request) {
   const agencyId = tokens.companyId || null;
   const locationId = tokens.locationId || null;
   const scopeArr = (tokens.scope || "").split(" ").filter(Boolean);
+
+  // Authoritative install target derived from the token payload
+  type InstallationTarget = "Company" | "Location";
+  const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
   // 2) Upsert installs/{installId or agencyId}
   const installsCol = db().collection("installs");
@@ -194,9 +199,9 @@ export async function GET(request: Request) {
       );
   }
 
-  // 4) If Agency install, snapshot/relate locations and mint per-location tokens
+  // 4) If Agency-level install, snapshot/relate locations and mint per-location tokens
   try {
-    if (agencyId && isCompany(userType)) {
+    if (agencyId && installationTarget === "Company") {
       // Use agency access token to list all locations
       const locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
       const limit = 200;
@@ -277,7 +282,8 @@ export async function GET(request: Request) {
   if (locationId) ui.searchParams.set("locationId", locationId);
 
   olog("oauth success", {
-    userType,
+    userTypeQuery,                          // what the URL said (not trusted)
+    derivedInstallTarget: installationTarget, // what the token proves
     agencyId,
     locationId,
     scopes: scopeArr.slice(0, 8),

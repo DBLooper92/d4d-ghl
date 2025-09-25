@@ -32,7 +32,6 @@ export async function GET(request: Request) {
   auth.searchParams.set("redirect_uri", redirectUri);
   if (scope) auth.searchParams.set("scope", scope);
   // Start install at Agency level by default; GHL may override via UI
-  auth.searchParams.set("user_type", "Company");
   auth.searchParams.set("state", state);
 
   olog("prepare redirect", { redirectUri, scope, stateEnc: state.slice(0, 12) + "…" });
