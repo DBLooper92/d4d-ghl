@@ -1,9 +1,10 @@
 // File: src/app/app/page.tsx
 "use client";
 
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
-export default function Dashboard() {
+function DashboardInner() {
   const qp = useSearchParams();
   const installed = qp.get("installed") === "1";
   const agencyId = qp.get("agencyId");
@@ -24,5 +25,20 @@ export default function Dashboard() {
         {JSON.stringify({ installed, agencyId, locationId }, null, 2)}
       </pre>
     </main>
+  );
+}
+
+export default function Page() {
+  return (
+    <Suspense
+      fallback={
+        <main style={{ padding: 24 }}>
+          <h1>D4D Dashboard</h1>
+          <p>Loading…</p>
+        </main>
+      }
+    >
+      <DashboardInner />
+    </Suspense>
   );
 }
