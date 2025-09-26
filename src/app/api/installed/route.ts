@@ -10,52 +10,76 @@ function truthyStr(v: unknown) {
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  // Accept several aliases just in case the CML is configured differently
-  const locationId =
+
+  // Accept several aliases (GHL uses snake_case in CML)
+  const locationIdRaw =
     url.searchParams.get("location_id") ||
     url.searchParams.get("locationId") ||
     url.searchParams.get("location") ||
     "";
 
-  const agencyIdIn =
+  const agencyIdRaw =
     url.searchParams.get("agency_id") ||
     url.searchParams.get("agencyId") ||
     "";
+
+  const locationIdIn = locationIdRaw.trim();
+  const agencyIdIn = agencyIdRaw.trim();
 
   let installed = false;
   let agencyId: string | null = null;
   let finalLocationId: string | null = null;
 
   try {
-    if (truthyStr(locationId)) {
-      // Look up the location doc
-      const locSnap = await db().collection("locations").doc(locationId!).get();
+    if (truthyStr(locationIdIn)) {
+      // Primary: check a specific location doc
+      const locSnap = await db().collection("locations").doc(locationIdIn).get();
       if (locSnap.exists) {
         const data = locSnap.data() || {};
-        finalLocationId = locationId!;
+        finalLocationId = locationIdIn;
         agencyId = (data.agencyId as string) || null;
-        // consider installed if either refreshToken exists or isInstalled flag is true
         installed = Boolean(data.refreshToken) || Boolean(data.isInstalled);
       }
     } else if (truthyStr(agencyIdIn)) {
-      // Fallback: agency level check (less precise inside the left menu)
-      const agSnap = await db().collection("agencies").doc(agencyIdIn!).get();
-      if (agSnap.exists) {
-        const data = agSnap.data() || {};
-        agencyId = agencyIdIn!;
-        installed = Boolean(data.refreshToken);
+      // Fallback (agency-level CML): is there ANY installed location for this agency?
+      const q = await db()
+        .collection("locations")
+        .where("agencyId", "==", agencyIdIn)
+        .where("isInstalled", "==", true)
+        .limit(1)
+        .get();
+
+      if (!q.empty) {
+        const doc = q.docs[0];
+        const data = doc.data() || {};
+        agencyId = agencyIdIn;
+        finalLocationId = (data.locationId as string) || doc.id;
+        installed = true;
+      } else {
+        // As an additional fallback, consider agency installed if it has a refresh token
+        const agSnap = await db().collection("agencies").doc(agencyIdIn).get();
+        if (agSnap.exists) {
+          const ag = agSnap.data() || {};
+          if (truthyStr(ag.refreshToken)) {
+            agencyId = agencyIdIn;
+            installed = true;
+          }
+        }
       }
     }
   } catch {
-    // Keep errors non-fatal for the UI
+    // Swallow errors; return a safe response
   }
 
   return NextResponse.json(
+    { installed, agencyId, locationId: finalLocationId },
     {
-      installed,
-      agencyId,
-      locationId: finalLocationId,
-    },
-    { status: 200 }
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store",
+        // Helpful for embeds
+        "X-Robots-Tag": "noindex",
+      },
+    }
   );
 }

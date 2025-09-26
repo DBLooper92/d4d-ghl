@@ -13,51 +13,58 @@ type InstalledResp = {
 function DashboardInner() {
   const qp = useSearchParams();
 
-  // 1) If we just returned from OAuth redirect, keep that quick happy path.
-  const installedFromRedirect = qp.get("installed") === "1";
-  const agencyIdFromRedirect = qp.get("agencyId");
-  const locationIdFromRedirect = qp.get("locationId");
+  // Accept both styles: ?locationId=... or ?location_id=...
+  const qpLocationId = qp.get("locationId") || qp.get("location_id");
+  const qpAgencyId = qp.get("agencyId") || qp.get("agency_id");
+  const qpInstalled = qp.get("installed") === "1";
 
-  // 2) Otherwise, attempt to resolve via /api/installed using whatever params we have
-  const [resolved, setResolved] = useState<InstalledResp | null>(null);
+  const [state, setState] = useState<InstalledResp>({
+    installed: qpInstalled,
+    agencyId: qpAgencyId,
+    locationId: qpLocationId,
+  });
   const [loading, setLoading] = useState(false);
 
-  // Build a query string to forward to /api/installed (e.g. location_id from CML)
-  const passthroughQs = useMemo(() => {
-    const keys = ["location_id", "locationId", "location", "agency_id", "agencyId"];
-    const params = new URLSearchParams();
-    keys.forEach((k) => {
-      const v = qp.get(k);
-      if (v) params.set(k, v);
-    });
-    return params.toString();
-  }, [qp]);
+  // If we have a locationId from the URL (e.g. GHL sidebar), verify against Firestore
+  const shouldVerify = useMemo(() => !!qpLocationId, [qpLocationId]);
 
   useEffect(() => {
-    // Only fetch if we are NOT on an OAuth-redirect success already
-    if (!installedFromRedirect) {
+    let cancelled = false;
+    async function run() {
+      if (!shouldVerify) return;
       setLoading(true);
-      const url = passthroughQs ? `/api/installed?${passthroughQs}` : `/api/installed`;
-      fetch(url)
-        .then((r) => r.json())
-        .then((j: InstalledResp) => setResolved(j))
-        .catch(() => setResolved({ installed: false, agencyId: null, locationId: null }))
-        .finally(() => setLoading(false));
+      try {
+        const url = new URL("/api/installed", window.location.origin);
+        url.searchParams.set("locationId", qpLocationId!);
+        const r = await fetch(url.toString(), { cache: "no-store" });
+        const json = (await r.json()) as InstalledResp;
+        if (!cancelled) setState(json);
+      } catch {
+        if (!cancelled) {
+          setState({
+            installed: false,
+            agencyId: null,
+            locationId: qpLocationId || null,
+          });
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
-  }, [installedFromRedirect, passthroughQs]);
-
-  const installed = installedFromRedirect || Boolean(resolved?.installed);
-  const agencyId = agencyIdFromRedirect ?? resolved?.agencyId ?? null;
-  const locationId = locationIdFromRedirect ?? resolved?.locationId ?? null;
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldVerify, qpLocationId]);
 
   return (
     <main style={{ padding: 24 }}>
       <h1>D4D Dashboard</h1>
 
-      {installed ? (
+      {loading ? (
+        <p>Checking install…</p>
+      ) : state.installed ? (
         <p>Install complete ✅</p>
-      ) : loading ? (
-        <p>Connecting…</p>
       ) : (
         <p>Welcome. Connect your GoHighLevel account to begin.</p>
       )}
@@ -67,7 +74,7 @@ function DashboardInner() {
       </p>
 
       <pre style={{ marginTop: 24, background: "rgba(127,127,127,.1)", padding: 12 }}>
-        {JSON.stringify({ installed, agencyId, locationId }, null, 2)}
+        {JSON.stringify(state, null, 2)}
       </pre>
     </main>
   );
