@@ -22,7 +22,6 @@ export function olog(msg: string, details?: unknown) {
       details ? JSON.stringify(details, (_k, v) => (Array.isArray(v) ? v.slice(0, 8) : v)) : ""
     );
   } catch {
-    // avoid logging crashes
     console.info(`${OAUTH_LOG_PREFIX} ${msg}`);
   }
 }
@@ -134,14 +133,13 @@ export function safeInstalled(l: AnyLoc): boolean {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Custom Menus
-// Docs show the resource path with a trailing slash: `/custom-menus/`.
-// Some routes 404 without it, so keep the slash.
+// Some routes 404 or validate differently depending on router version.
+// Keep a trailing slash on the base; support both list paths.
 // ─────────────────────────────────────────────────────────────────────────────
 export function ghlCustomMenusBase() {
   return "https://services.leadconnectorhq.com/custom-menus/"; // NOTE: trailing slash
 }
 
-// Scopes we expect for Custom Menu Link CRUD
 export const CML_SCOPES = {
   READ: "custom-menu-link.readonly",
   WRITE: "custom-menu-link.write",
@@ -153,3 +151,29 @@ export function scopeListFromTokenScope(scope?: string | null): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+// Candidate openMode values (the validator now rejects "IFRAME" in some envs)
+export const CML_OPEN_MODE_CANDIDATES = ["EMBED", "IFRAME", "IN_APP", "NEW_TAB"] as const;
+export type CmlOpenMode = (typeof CML_OPEN_MODE_CANDIDATES)[number];
+
+// Minimal icon object for the new API
+export type CmlIcon =
+  | { type: "EMOJI"; value: string }
+  | { type: "URL"; value: string };
+
+export type CustomMenu = {
+  id?: string;
+  title: string;
+  url: string;
+  // Old API fields (ignored by new validator)
+  placement?: string;
+  openMode?: string;
+  visibility?: { agency?: boolean; subAccount?: boolean };
+  // New API fields
+  icon?: CmlIcon;
+  showOnCompany?: boolean;
+  showOnLocation?: boolean;
+  showToAllLocations?: boolean;
+};
+
+export type CustomMenuListResponse = CustomMenu[] | { items?: CustomMenu[] };
