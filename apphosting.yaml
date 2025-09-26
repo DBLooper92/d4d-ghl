@@ -1,3 +1,4 @@
+# apphosting.yaml
 runConfig:
   minInstances: 0
   maxInstances: 10
@@ -11,25 +12,36 @@ env:
   - variable: OAUTH_LOG
     value: on
 
-  # Secrets at runtime
+  # Secrets at runtime (PIN VERSIONS!)
   - variable: GHL_CLIENT_ID
     secret: GHL_CLIENT_ID
+    # 👇 add this line
+    version: 2
     availability: [RUNTIME]
+
   - variable: GHL_CLIENT_SECRET
     secret: GHL_CLIENT_SECRET
+    version: 2
     availability: [RUNTIME]
+
   - variable: GHL_SHARED_SECRET_KEY
     secret: GHL_SHARED_SECRET_KEY
+    version: 2
     availability: [RUNTIME]
+
   - variable: GHL_WEBHOOK_PUBLIC_KEY
     secret: GHL_WEBHOOK_PUBLIC_KEY
+    # (add version here too if you rotated it)
     availability: [RUNTIME]
+
   - variable: GHL_SCOPES
     secret: GHL_SCOPES
+    # (add version if needed)
     availability: [RUNTIME]
-  # NEW: your Marketplace app/integration id (needed for installedLocations)
+
   - variable: GHL_INTEGRATION_ID
     secret: GHL_INTEGRATION_ID
+    # (add version if needed)
     availability: [RUNTIME]
 
   - variable: GHL_REDIRECT_PATH
