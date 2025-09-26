@@ -127,6 +127,6 @@ export function safeInstalled(l: AnyLoc): boolean {
   return Boolean(l.isInstalled);
 }
 
-export function ghlCustomMenusUrl(companyId: string) {
-  return `https://services.leadconnectorhq.com/companies/${companyId}/custom-menus`;
+export function ghlCustomMenusUrl() {
+  return "https://services.leadconnectorhq.com/custom-menus";
 }

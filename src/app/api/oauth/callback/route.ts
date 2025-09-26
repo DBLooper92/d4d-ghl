@@ -24,7 +24,7 @@ export const runtime = "nodejs"; // Node APIs for crypto/cookies
 
 // Types for Custom Menu API
 type CustomMenu = {
-  id: string;
+  id?: string;
   title: string;
   url: string;
   placement?: string;
@@ -34,20 +34,19 @@ type CustomMenu = {
 type CustomMenuListResponse = CustomMenu[] | { items?: CustomMenu[] };
 
 async function ensureCml(accessToken: string, companyId: string) {
-  const base = ghlCustomMenusUrl(companyId);
+  const base = ghlCustomMenusUrl();
 
-  // 1) List existing (idempotency)
-  const list = await fetch(base, {
+  // 1) List (idempotency)
+  const list = await fetch(`${base}?companyId=${encodeURIComponent(companyId)}`, {
     headers: lcHeaders(accessToken),
     cache: "no-store",
   });
 
   if (list.ok) {
-    let menus: CustomMenu[] = [];
     const payload = (await list.json().catch(() => null)) as CustomMenuListResponse | null;
-    if (payload) {
-      menus = Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : [];
-    }
+    const menus = payload
+      ? Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : []
+      : [];
     const exists = menus.some(
       (m) =>
         (m.title || "").toLowerCase() === "driving for dollars" &&
@@ -58,18 +57,17 @@ async function ensureCml(accessToken: string, companyId: string) {
   }
 
   // 2) Create (Left Sidebar, iFrame, visible in sub-accounts)
-  const createPayload = {
-    title: "Driving for Dollars",
-    url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
-    placement: "LEFT_SIDEBAR",
-    openMode: "IFRAME",
-    visibility: { agency: false, subAccount: true },
-  } as const;
-
   const create = await fetch(base, {
     method: "POST",
     headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
-    body: JSON.stringify(createPayload),
+    body: JSON.stringify({
+      companyId,
+      title: "Driving for Dollars",
+      url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
+      placement: "LEFT_SIDEBAR",
+      openMode: "IFRAME",
+      visibility: { agency: false, subAccount: true },
+    }),
   });
 
   if (!create.ok) {
