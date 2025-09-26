@@ -66,7 +66,7 @@ export function getGhlConfig() {
   return {
     clientId: required("GHL_CLIENT_ID"),
     clientSecret: required("GHL_CLIENT_SECRET"),
-    scope: process.env.GHL_SCOPES || "",
+    scope: process.env.GHL_SCOPES || "", // this should now be agency-focused scopes
     redirectUri,
     baseApp,
     integrationId: process.env.GHL_INTEGRATION_ID || "",

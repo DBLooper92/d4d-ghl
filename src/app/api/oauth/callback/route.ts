@@ -20,7 +20,7 @@ import {
 } from "@/lib/ghl";
 import { FieldValue } from "firebase-admin/firestore";
 
-export const runtime = "nodejs"; // Node APIs for crypto/cookies
+export const runtime = "nodejs";
 
 // Types for Custom Menu API
 type CustomMenu = {
@@ -33,8 +33,15 @@ type CustomMenu = {
 };
 type CustomMenuListResponse = CustomMenu[] | { items?: CustomMenu[] };
 
-async function ensureCml(accessToken: string, companyId: string) {
+async function ensureCml(accessToken: string, companyId: string, agencyScopesEcho: string[]) {
   const base = ghlCustomMenusUrl();
+
+  // Helpful sanity logging
+  olog("ensureCml precheck", {
+    companyId,
+    hasWrite: agencyScopesEcho.includes("custom-menu-link.write"),
+    hasRead: agencyScopesEcho.includes("custom-menu-link.readonly"),
+  });
 
   // 1) List (idempotency)
   const list = await fetch(`${base}?companyId=${encodeURIComponent(companyId)}`, {
@@ -80,7 +87,6 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
 
-  // Pass through user_type only if GHL supplied it. We do not guess here.
   const userTypeQueryRaw =
     url.searchParams.get("user_type") ||
     url.searchParams.get("userType") ||
@@ -98,7 +104,6 @@ export async function GET(request: Request) {
   const ck = await cookies();
   const cookieNonce = ck.get("d4d_oauth_state")?.value || "";
 
-  // Allow fallback if coming from GHL and state omitted, else enforce state
   const hdrs = await headers();
   const referer = hdrs.get("referer") || "";
   const fromGhl = /gohighlevel\.com|leadconnector/i.test(referer);
@@ -159,9 +164,7 @@ export async function GET(request: Request) {
   type InstallationTarget = "Company" | "Location";
   const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
-  // ─────────────────────────────────────────────────────────────────────────────
   // 2) Upsert agency document
-  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId) {
     const agenciesRef = db().collection("agencies").doc(agencyId);
     const snap = await agenciesRef.get();
@@ -180,9 +183,7 @@ export async function GET(request: Request) {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
   // 3) If Location install, persist that single location
-  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId && locationId) {
     await db().collection("locations").doc(locationId).set(
       {
@@ -215,9 +216,7 @@ export async function GET(request: Request) {
       );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
   // 4) Company-level discovery + mint per-location tokens (best effort)
-  // ─────────────────────────────────────────────────────────────────────────────
   try {
     if (agencyId && installationTarget === "Company") {
       let locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
@@ -337,12 +336,10 @@ export async function GET(request: Request) {
     olog("location discovery/mint error", { message: (e as Error).message });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
   // 4.5) Ensure the Custom Menu Link exists for this agency (idempotent)
-  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId) {
     try {
-      await ensureCml(tokens.access_token, agencyId);
+      await ensureCml(tokens.access_token, agencyId, scopeArr);
     } catch (e) {
       olog("ensureCml error (non-fatal)", { err: String(e) });
     }
@@ -355,12 +352,13 @@ export async function GET(request: Request) {
   if (agencyId) ui.searchParams.set("agencyId", agencyId);
   if (locationId) ui.searchParams.set("locationId", locationId);
 
+  // IMPORTANT: log full scopes (no truncation)
   olog("oauth success", {
     userTypeQuery: userTypeForToken ?? "",
     derivedInstallTarget: installationTarget,
     agencyId,
     locationId,
-    scopes: scopeArr.slice(0, 8),
+    scopes: scopeArr, // full
   });
 
   return NextResponse.redirect(ui.toString(), { status: 302 });
