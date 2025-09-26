@@ -21,20 +21,6 @@ import { FieldValue } from "firebase-admin/firestore";
 
 export const runtime = "nodejs"; // Node APIs for crypto/cookies
 
-type InstallDoc = {
-  provider: "leadconnector";
-  agencyId: string | null;
-  locationId?: string | null;
-  scopes: string[];
-  tokenMeta: {
-    expiresIn: number;
-    type: string;
-    savedAt: FirebaseFirestore.FieldValue;
-  };
-  createdAt?: FirebaseFirestore.FieldValue;
-  updatedAt: FirebaseFirestore.FieldValue;
-};
-
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
@@ -118,94 +104,75 @@ export async function GET(request: Request) {
   type InstallationTarget = "Company" | "Location";
   const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
-  // 2) Upsert installs/{installId} (select by agencyId when present)
-  const installsCol = db().collection("installs");
-  let installRef = installsCol.doc();
-  let isNew = true;
-
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 2) Upsert agencies/{agencyId} with agency-level refresh token + metadata
+  //    (doc id = agencyId). Also create/update subcollection agencies/{agencyId}/locations later.
+  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId) {
-    const q = await installsCol.where("agencyId", "==", agencyId).limit(1).get();
-    if (!q.empty) {
-      installRef = q.docs[0].ref;
-      isNew = false;
-    }
+    const agenciesRef = db().collection("agencies").doc(agencyId);
+    const snap = await agenciesRef.get();
+    const isNewAgency = !snap.exists;
+
+    await agenciesRef.set(
+      {
+        agencyId,
+        provider: "leadconnector",
+        scopes: scopeArr,
+        // Save the latest refresh token if present (agency token on Company installs)
+        ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
+        installedAt: isNewAgency ? FieldValue.serverTimestamp() : snap.get("installedAt") ?? FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
   }
 
-  const installDoc: InstallDoc = {
-    provider: "leadconnector",
-    agencyId,
-    locationId,
-    scopes: scopeArr,
-    tokenMeta: {
-      expiresIn: tokens.expires_in,
-      type: tokens.token_type,
-      savedAt: FieldValue.serverTimestamp(),
-    },
-    updatedAt: FieldValue.serverTimestamp(),
-    ...(isNew ? { createdAt: FieldValue.serverTimestamp() } : {}),
-  };
-  await installRef.set(installDoc, { merge: true });
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 3) If this was a Location install, persist that single location both top-level
+  //    and under agencies/{agencyId}/locations/{locationId}
+  // ─────────────────────────────────────────────────────────────────────────────
+  if (agencyId && locationId) {
+    // Top-level locations/{locationId}
+    await db().collection("locations").doc(locationId).set(
+      {
+        locationId,
+        agencyId,
+        provider: "leadconnector",
+        // For a Location install, this is a location-scoped refresh token
+        ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
+        isInstalled: true,
+        // Name is unknown at this point; it will be set during discovery/refresh paths
+        name: null,
+        installedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
 
-  // 3) Persist tokens (Firestore in this project)
-  if (agencyId && tokens.refresh_token) {
+    // agencies/{agencyId}/locations/{locationId}
     await db()
       .collection("agencies")
       .doc(agencyId)
-      .set(
-        {
-          agencyId,
-          provider: "leadconnector",
-          refreshToken: tokens.refresh_token,
-          updatedAt: FieldValue.serverTimestamp(),
-          ...(isNew ? { createdAt: FieldValue.serverTimestamp() } : {}),
-        },
-        { merge: true }
-      );
-  }
-  if (locationId && tokens.refresh_token) {
-    // If we truly got a location-level token, save it under locations
-    await db()
       .collection("locations")
       .doc(locationId)
       .set(
         {
           locationId,
           agencyId,
-          provider: "leadconnector",
-          refreshToken: tokens.refresh_token,
-          isInstalled: true,
-          updatedAt: FieldValue.serverTimestamp(),
-          ...(isNew ? { createdAt: FieldValue.serverTimestamp() } : {}),
-        },
-        { merge: true }
-      );
-
-    // Also mirror under installs/{installId}/locations/{locationId} so
-    // downstream code can treat this install’s known locations canonically.
-    await installRef
-      .collection("locations")
-      .doc(locationId)
-      .set(
-        {
-          locationId,
           name: null,
-          isInstalled: true,
-          tokenMeta: {
-            expiresIn: tokens.expires_in,
-            type: tokens.token_type,
-            savedAt: FieldValue.serverTimestamp(),
-          },
-          scopesApi: scopeArr,
-          scopesExpected: scopeArr, // you can replace with your expected list constant
-          scopes: scopeArr,
-          discoveredAt: FieldValue.serverTimestamp(),
+          installedAt: FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // 4) Company-level path: discover locations & mint per-location tokens
+  //    Writes to:
+  //      - locations/{locationId} (top-level)
+  //      - agencies/{agencyId}/locations/{locationId}
+  // ─────────────────────────────────────────────────────────────────────────────
   try {
     if (agencyId && installationTarget === "Company") {
       // First try the “installed locations” endpoint if we know our app/integration id
@@ -252,10 +219,12 @@ export async function GET(request: Request) {
         olog("company locations fallback", { count: locs.length });
       }
 
-      // Persist each location top-level *and* under install doc
+      // Persist locations to both places (top-level & under agency subcollection)
       const batch = db().batch();
       const now = FieldValue.serverTimestamp();
+
       for (const l of locs) {
+        // Top-level: locations/{locationId}
         const locRef = db().collection("locations").doc(l.id);
         batch.set(
           locRef,
@@ -263,21 +232,23 @@ export async function GET(request: Request) {
             locationId: l.id,
             agencyId,
             provider: "leadconnector",
-            name: l.name,
+            name: l.name ?? null,
             isInstalled: Boolean(l.isInstalled),
+            installedAt: now,
             updatedAt: now,
           },
           { merge: true }
         );
 
-        const installLocRef = installRef.collection("locations").doc(l.id);
+        // agencies/{agencyId}/locations/{locationId}
+        const agencyLocRef = db().collection("agencies").doc(agencyId).collection("locations").doc(l.id);
         batch.set(
-          installLocRef,
+          agencyLocRef,
           {
             locationId: l.id,
+            agencyId,
             name: l.name ?? null,
-            isInstalled: Boolean(l.isInstalled),
-            discoveredAt: now,
+            installedAt: now,
             updatedAt: now,
           },
           { merge: true }
@@ -299,54 +270,26 @@ export async function GET(request: Request) {
             continue;
           }
 
-          const body = (await resp.json()) as { data?: { refresh_token?: string; scope?: string; expires_in?: number; token_type?: string } } & {
-            refresh_token?: string;
-            scope?: string;
-            expires_in?: number;
-            token_type?: string;
+          const body = (await resp.json()) as {
+            data?: { refresh_token?: string; scope?: string; expires_in?: number; token_type?: string };
+            refresh_token?: string; scope?: string; expires_in?: number; token_type?: string;
           };
-          const mintedRefresh = body?.data?.refresh_token ?? body?.refresh_token ?? "";
-          const scopesApi = (body?.data?.scope ?? body?.scope ?? "").split(" ").filter(Boolean);
-          const expiresIn = Number(body?.data?.expires_in ?? body?.expires_in ?? 0) || 0;
-          const tokenType = String(body?.data?.token_type ?? body?.token_type ?? "");
 
+          const mintedRefresh = body?.data?.refresh_token ?? body?.refresh_token ?? "";
           if (!mintedRefresh) {
             olog("mint missing refresh_token", { locationId: l.id });
             continue;
           }
 
-          // Save under top-level
-          await db()
-            .collection("locations")
-            .doc(l.id)
-            .set(
-              {
-                refreshToken: mintedRefresh,
-                isInstalled: true,
-                updatedAt: FieldValue.serverTimestamp(),
-              },
-              { merge: true }
-            );
-
-          // And mirror under installs/{installId}/locations/{loc}
-          await installRef
-            .collection("locations")
-            .doc(l.id)
-            .set(
-              {
-                tokenMeta: {
-                  expiresIn: expiresIn,
-                  type: tokenType || tokens.token_type,
-                  savedAt: FieldValue.serverTimestamp(),
-                },
-                scopesApi,
-                scopesExpected: scopesApi, // or your constant expected scope string split
-                scopes: scopesApi,
-                isInstalled: true,
-                updatedAt: FieldValue.serverTimestamp(),
-              },
-              { merge: true }
-            );
+          // Save refresh token under top-level locations/{locationId}
+          await db().collection("locations").doc(l.id).set(
+            {
+              refreshToken: mintedRefresh,
+              isInstalled: true,
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
         } catch (e) {
           olog("mint error (non-fatal)", { locationId: l.id, err: String(e) });
         }
@@ -370,7 +313,6 @@ export async function GET(request: Request) {
     agencyId,
     locationId,
     scopes: scopeArr.slice(0, 8),
-    installId: installRef.id,
   });
 
   return NextResponse.redirect(ui.toString(), { status: 302 });
