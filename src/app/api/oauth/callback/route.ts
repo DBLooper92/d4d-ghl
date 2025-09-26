@@ -16,11 +16,13 @@ import {
   ghlInstalledLocationsUrl,
   ghlCompanyLocationsUrl,
   ghlMintLocationTokenUrl,
-  ghlCustomMenusUrl,
+  ghlCustomMenusBase,
+  CML_SCOPES,
+  scopeListFromTokenScope,
 } from "@/lib/ghl";
 import { FieldValue } from "firebase-admin/firestore";
 
-export const runtime = "nodejs";
+export const runtime = "nodejs"; // Node APIs for crypto/cookies
 
 // Types for Custom Menu API
 type CustomMenu = {
@@ -33,26 +35,61 @@ type CustomMenu = {
 };
 type CustomMenuListResponse = CustomMenu[] | { items?: CustomMenu[] };
 
-async function ensureCml(accessToken: string, companyId: string, agencyScopesEcho: string[]) {
-  const base = ghlCustomMenusUrl();
+/**
+ * Ensure a Custom Menu Link exists for this agency.
+ * - Verifies the token has the right scopes
+ * - GETs current menus (company filter)
+ * - POSTs create if not present
+ * - Tries both URL shapes if API returns 404 (router quirk)
+ */
+async function ensureCml(accessToken: string, companyId: string, tokenScopes: string[]) {
+  const base = ghlCustomMenusBase();
 
-  // Helpful sanity logging
-  olog("ensureCml precheck", {
-    companyId,
-    hasWrite: agencyScopesEcho.includes("custom-menu-link.write"),
-    hasRead: agencyScopesEcho.includes("custom-menu-link.readonly"),
-  });
+  const hasRead = tokenScopes.includes(CML_SCOPES.READ);
+  const hasWrite = tokenScopes.includes(CML_SCOPES.WRITE);
+
+  olog("ensureCml precheck", { companyId, hasWrite, hasRead });
+
+  if (!hasRead || !hasWrite) {
+    // Don’t attempt writes if scopes aren’t actually present on the token.
+    return;
+  }
+
+  // Helper to GET menus with a given URL
+  const tryList = async (url: string) => {
+    const r = await fetch(url, { headers: lcHeaders(accessToken), cache: "no-store" });
+    const text = await r.text().catch(() => "");
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      /* not JSON */
+    }
+    return { ok: r.ok, status: r.status, bodyText: text, json };
+  };
+
+  const mkUrl = (style: "query" | "nested") =>
+    style === "query"
+      ? `${base}?companyId=${encodeURIComponent(companyId)}`
+      : `${base}companies/${encodeURIComponent(companyId)}`;
 
   // 1) List (idempotency)
-  const list = await fetch(`${base}?companyId=${encodeURIComponent(companyId)}`, {
-    headers: lcHeaders(accessToken),
-    cache: "no-store",
-  });
+  let listResp = await tryList(mkUrl("query"));
+  if (!listResp.ok && listResp.status === 404) {
+    // Try alternate shape if their router cares
+    const alt = mkUrl("nested");
+    olog("ensureCml list 404; retrying alternate", { url: alt });
+    listResp = await tryList(alt);
+  }
 
-  if (list.ok) {
-    const payload = (await list.json().catch(() => null)) as CustomMenuListResponse | null;
+  if (listResp.ok) {
+    const payload = listResp.json as CustomMenuListResponse | null;
     const menus = payload
-      ? Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : []
+      ? Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload.items)
+          ? payload.items
+          : []
       : [];
     const exists = menus.some(
       (m) =>
@@ -61,25 +98,47 @@ async function ensureCml(accessToken: string, companyId: string, agencyScopesEch
         m.url.startsWith("https://app.driving4dollars.co/app")
     );
     if (exists) return;
+  } else {
+    olog("ensureCml list failed", {
+      status: listResp.status,
+      sample: (listResp.bodyText || "").slice(0, 400),
+    });
+    // Continue to try create anyway.
   }
 
   // 2) Create (Left Sidebar, iFrame, visible in sub-accounts)
-  const create = await fetch(base, {
-    method: "POST",
-    headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
-    body: JSON.stringify({
-      companyId,
-      title: "Driving for Dollars",
-      url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
-      placement: "LEFT_SIDEBAR",
-      openMode: "IFRAME",
-      visibility: { agency: false, subAccount: true },
-    }),
-  });
+  const body = {
+    companyId,
+    title: "Driving for Dollars",
+    url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
+    placement: "LEFT_SIDEBAR",
+    openMode: "IFRAME",
+    visibility: { agency: false, subAccount: true },
+  };
 
-  if (!create.ok) {
-    const txt = await create.text().catch(() => "");
-    olog("CML create failed", { status: create.status, body: txt.slice(0, 400) });
+  // Helper to POST create with a given URL
+  const tryCreate = async (url: string) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const t = await r.text().catch(() => "");
+    return { ok: r.ok, status: r.status, bodyText: t };
+  };
+
+  let createResp = await tryCreate(base); // NOTE: base already ends with '/'
+  if (!createResp.ok && createResp.status === 404) {
+    const alt = `${base}companies/${encodeURIComponent(companyId)}`;
+    olog("ensureCml create 404; retrying alternate", { url: alt });
+    createResp = await tryCreate(alt);
+  }
+
+  if (!createResp.ok) {
+    olog("CML create failed", {
+      status: createResp.status,
+      body: (createResp.bodyText || "").slice(0, 500),
+    });
   }
 }
 
@@ -87,6 +146,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
 
+  // Pass through user_type only if GHL supplied it. We do not guess here.
   const userTypeQueryRaw =
     url.searchParams.get("user_type") ||
     url.searchParams.get("userType") ||
@@ -104,6 +164,7 @@ export async function GET(request: Request) {
   const ck = await cookies();
   const cookieNonce = ck.get("d4d_oauth_state")?.value || "";
 
+  // Allow fallback if coming from GHL and state omitted, else enforce state
   const hdrs = await headers();
   const referer = hdrs.get("referer") || "";
   const fromGhl = /gohighlevel\.com|leadconnector/i.test(referer);
@@ -153,7 +214,7 @@ export async function GET(request: Request) {
 
   const agencyId = tokens.companyId || null;
   const locationId = tokens.locationId || null;
-  const scopeArr = (tokens.scope || "").split(" ").filter(Boolean);
+  const scopeArr = scopeListFromTokenScope(tokens.scope);
 
   olog("token snapshot", {
     userTypeForToken: userTypeForToken ?? "(none)",
@@ -164,7 +225,9 @@ export async function GET(request: Request) {
   type InstallationTarget = "Company" | "Location";
   const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // 2) Upsert agency document
+  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId) {
     const agenciesRef = db().collection("agencies").doc(agencyId);
     const snap = await agenciesRef.get();
@@ -183,7 +246,9 @@ export async function GET(request: Request) {
     );
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // 3) If Location install, persist that single location
+  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId && locationId) {
     await db().collection("locations").doc(locationId).set(
       {
@@ -216,7 +281,9 @@ export async function GET(request: Request) {
       );
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // 4) Company-level discovery + mint per-location tokens (best effort)
+  // ─────────────────────────────────────────────────────────────────────────────
   try {
     if (agencyId && installationTarget === "Company") {
       let locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
@@ -336,7 +403,9 @@ export async function GET(request: Request) {
     olog("location discovery/mint error", { message: (e as Error).message });
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // 4.5) Ensure the Custom Menu Link exists for this agency (idempotent)
+  // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId) {
     try {
       await ensureCml(tokens.access_token, agencyId, scopeArr);
@@ -352,13 +421,13 @@ export async function GET(request: Request) {
   if (agencyId) ui.searchParams.set("agencyId", agencyId);
   if (locationId) ui.searchParams.set("locationId", locationId);
 
-  // IMPORTANT: log full scopes (no truncation)
   olog("oauth success", {
     userTypeQuery: userTypeForToken ?? "",
     derivedInstallTarget: installationTarget,
     agencyId,
     locationId,
-    scopes: scopeArr, // full
+    // log first few scopes for brevity
+    scopes: scopeArr.slice(0, 8),
   });
 
   return NextResponse.redirect(ui.toString(), { status: 302 });

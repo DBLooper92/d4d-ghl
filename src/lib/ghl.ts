@@ -16,10 +16,15 @@ export const OAUTH_LOG_PREFIX = "[oauth]";
 
 export function olog(msg: string, details?: unknown) {
   if (!OAUTH_LOG) return;
-  console.info(
-    `${OAUTH_LOG_PREFIX} ${msg}`,
-    details ? JSON.stringify(details, (_k, v) => (Array.isArray(v) ? v.slice(0, 5) : v)) : ""
-  );
+  try {
+    console.info(
+      `${OAUTH_LOG_PREFIX} ${msg}`,
+      details ? JSON.stringify(details, (_k, v) => (Array.isArray(v) ? v.slice(0, 8) : v)) : ""
+    );
+  } catch {
+    // avoid logging crashes
+    console.info(`${OAUTH_LOG_PREFIX} ${msg}`);
+  }
 }
 
 export function lcHeaders(accessToken: string, extra?: Record<string, string>) {
@@ -66,7 +71,7 @@ export function getGhlConfig() {
   return {
     clientId: required("GHL_CLIENT_ID"),
     clientSecret: required("GHL_CLIENT_SECRET"),
-    scope: process.env.GHL_SCOPES || "", // this should now be agency-focused scopes
+    scope: process.env.GHL_SCOPES || "",
     redirectUri,
     baseApp,
     integrationId: process.env.GHL_INTEGRATION_ID || "",
@@ -127,6 +132,24 @@ export function safeInstalled(l: AnyLoc): boolean {
   return Boolean(l.isInstalled);
 }
 
-export function ghlCustomMenusUrl() {
-  return "https://services.leadconnectorhq.com/custom-menus";
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom Menus
+// Docs show the resource path with a trailing slash: `/custom-menus/`.
+// Some routes 404 without it, so keep the slash.
+// ─────────────────────────────────────────────────────────────────────────────
+export function ghlCustomMenusBase() {
+  return "https://services.leadconnectorhq.com/custom-menus/"; // NOTE: trailing slash
+}
+
+// Scopes we expect for Custom Menu Link CRUD
+export const CML_SCOPES = {
+  READ: "custom-menu-link.readonly",
+  WRITE: "custom-menu-link.write",
+};
+
+export function scopeListFromTokenScope(scope?: string | null): string[] {
+  return (scope || "")
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
