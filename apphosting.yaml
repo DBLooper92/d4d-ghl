@@ -6,34 +6,31 @@ runConfig:
   memoryMiB: 512
 
 env:
-  # Static env values
   - variable: NEXT_PUBLIC_APP_BASE_URL
     value: https://app.driving4dollars.co
   - variable: OAUTH_LOG
-    value: on   # toggle to "off" to silence OAuth logs
+    value: on
 
-  # Secret bindings → only at runtime
+  # Secrets at runtime
   - variable: GHL_CLIENT_ID
     secret: GHL_CLIENT_ID
-    availability:
-      - RUNTIME
+    availability: [RUNTIME]
   - variable: GHL_CLIENT_SECRET
     secret: GHL_CLIENT_SECRET
-    availability:
-      - RUNTIME
+    availability: [RUNTIME]
   - variable: GHL_SHARED_SECRET_KEY
     secret: GHL_SHARED_SECRET_KEY
-    availability:
-      - RUNTIME
+    availability: [RUNTIME]
   - variable: GHL_WEBHOOK_PUBLIC_KEY
     secret: GHL_WEBHOOK_PUBLIC_KEY
-    availability:
-      - RUNTIME
+    availability: [RUNTIME]
   - variable: GHL_SCOPES
     secret: GHL_SCOPES
-    availability:
-      - RUNTIME
+    availability: [RUNTIME]
+  # NEW: your Marketplace app/integration id (needed for installedLocations)
+  - variable: GHL_INTEGRATION_ID
+    secret: GHL_INTEGRATION_ID
+    availability: [RUNTIME]
 
-  # Literal (not a secret)
   - variable: GHL_REDIRECT_PATH
     value: /api/oauth/callback

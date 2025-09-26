@@ -8,6 +8,12 @@ import {
   lcHeaders,
   OAuthTokens,
   olog,
+  LCListLocationsResponse,
+  pickLocs,
+  safeId,
+  safeInstalled,
+  safeName,
+  ghlInstalledLocationsUrl,
   ghlCompanyLocationsUrl,
   ghlMintLocationTokenUrl,
 } from "@/lib/ghl";
@@ -29,48 +35,11 @@ type InstallDoc = {
   updatedAt: FirebaseFirestore.FieldValue;
 };
 
-// Types for /companies/{id}/locations response
-type AnyLoc = {
-  id?: string;
-  _id?: string;
-  locationId?: string;
-  name?: string;
-  isInstalled?: boolean;
-};
-type LCListLocationsResponse = { locations?: AnyLoc[] } | AnyLoc[];
-
-function pickLocs(json: unknown): AnyLoc[] {
-  if (Array.isArray(json)) return json.filter(isAnyLoc);
-  if (isObj(json) && Array.isArray((json as { locations?: unknown }).locations)) {
-    const arr = (json as { locations?: unknown }).locations;
-    return (arr as unknown[]).filter(isAnyLoc) as AnyLoc[];
-  }
-  return [];
-}
-function isObj(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-function isAnyLoc(v: unknown): v is AnyLoc {
-  if (!isObj(v)) return false;
-  return "id" in v || "locationId" in v || "_id" in v;
-}
-function safeId(l: AnyLoc): string | null {
-  const cands = [l.id, l.locationId, l._id].map((x) => (typeof x === "string" ? x.trim() : ""));
-  const id = cands.find((s) => s && s.length > 0);
-  return id ?? null;
-}
-function safeName(l: AnyLoc): string | null {
-  return typeof l.name === "string" && l.name.trim() ? l.name : null;
-}
-function safeInstalled(l: AnyLoc): boolean {
-  return Boolean(l.isInstalled);
-}
-
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
 
-  // What GHL says it is installing *to* (Company | Location). We’ll pass this through to the token exchange.
+  // Pass through user_type only if GHL supplied it. We do not guess here.
   const userTypeQueryRaw =
     url.searchParams.get("user_type") ||
     url.searchParams.get("userType") ||
@@ -105,10 +74,9 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing code" }, { status: 400 });
   }
 
-  const { clientId, clientSecret, redirectUri, baseApp } = getGhlConfig();
+  const { clientId, clientSecret, redirectUri, baseApp, integrationId } = getGhlConfig();
 
   // 1) Exchange code → tokens
-  // IMPORTANT: Send user_type exactly as provided by GHL so a Location install returns a location token.
   const form = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -141,18 +109,16 @@ export async function GET(request: Request) {
   const locationId = tokens.locationId || null;
   const scopeArr = (tokens.scope || "").split(" ").filter(Boolean);
 
-  // Debug (safe): visibility only, no secrets
   olog("token snapshot", {
     userTypeForToken: userTypeForToken ?? "(none)",
     hasCompanyId: !!agencyId,
     hasLocationId: !!locationId,
   });
 
-  // Derive install target; token payload is authoritative
   type InstallationTarget = "Company" | "Location";
   const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
-  // 2) Upsert installs/{installId or agencyId}
+  // 2) Upsert installs/{installId} (select by agencyId when present)
   const installsCol = db().collection("installs");
   let installRef = installsCol.doc();
   let isNew = true;
@@ -180,7 +146,7 @@ export async function GET(request: Request) {
   };
   await installRef.set(installDoc, { merge: true });
 
-  // 3) Persist tokens in Firestore (NOT Secret Manager)
+  // 3) Persist tokens (Firestore in this project)
   if (agencyId && tokens.refresh_token) {
     await db()
       .collection("agencies")
@@ -197,6 +163,7 @@ export async function GET(request: Request) {
       );
   }
   if (locationId && tokens.refresh_token) {
+    // If we truly got a location-level token, save it under locations
     await db()
       .collection("locations")
       .doc(locationId)
@@ -212,30 +179,80 @@ export async function GET(request: Request) {
         },
         { merge: true }
       );
+
+    // Also mirror under installs/{installId}/locations/{locationId} so
+    // downstream code can treat this install’s known locations canonically.
+    await installRef
+      .collection("locations")
+      .doc(locationId)
+      .set(
+        {
+          locationId,
+          name: null,
+          isInstalled: true,
+          tokenMeta: {
+            expiresIn: tokens.expires_in,
+            type: tokens.token_type,
+            savedAt: FieldValue.serverTimestamp(),
+          },
+          scopesApi: scopeArr,
+          scopesExpected: scopeArr, // you can replace with your expected list constant
+          scopes: scopeArr,
+          discoveredAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
   }
 
-  // 4) If Agency-level install, snapshot/relate locations and mint per-location tokens
+  // 4) Company-level path: discover locations & mint per-location tokens
   try {
     if (agencyId && installationTarget === "Company") {
-      const locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
-      const limit = 200;
-      for (let page = 1; page < 999; page++) {
-        const r = await fetch(ghlCompanyLocationsUrl(agencyId, page, limit), {
-          headers: lcHeaders(tokens.access_token),
-        });
-        if (!r.ok) break;
-
-        const j = (await r.json()) as LCListLocationsResponse;
-        const arr = pickLocs(j);
-
-        for (const e of arr) {
-          const id = safeId(e);
-          if (!id) continue;
-          locs.push({ id, name: safeName(e), isInstalled: safeInstalled(e) });
+      // First try the “installed locations” endpoint if we know our app/integration id
+      let locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
+      if (integrationId) {
+        try {
+          const r = await fetch(ghlInstalledLocationsUrl(agencyId, integrationId), {
+            headers: lcHeaders(tokens.access_token),
+          });
+          if (r.ok) {
+            const data = (await r.json()) as LCListLocationsResponse;
+            const arr = pickLocs(data);
+            locs = arr
+              .map((e) => ({ id: safeId(e), name: safeName(e), isInstalled: safeInstalled(e) }))
+              .filter((x): x is { id: string; name: string | null; isInstalled: boolean } => !!x.id);
+            olog("installedLocations discovered", { count: locs.length });
+          } else {
+            olog("installedLocations failed, will fallback", { status: r.status, body: await r.text().catch(() => "") });
+          }
+        } catch (e) {
+          olog("installedLocations error, will fallback", { err: String(e) });
         }
-        if (arr.length < limit) break;
       }
 
+      // Fallback to listing *all* company locations
+      if (!locs.length) {
+        const limit = 200;
+        for (let page = 1; page < 999; page++) {
+          const r = await fetch(ghlCompanyLocationsUrl(agencyId, page, limit), {
+            headers: lcHeaders(tokens.access_token),
+          });
+          if (!r.ok) break;
+
+          const j = (await r.json()) as LCListLocationsResponse;
+          const arr = pickLocs(j);
+
+          for (const e of arr) {
+            const id = safeId(e);
+            if (!id) continue;
+            locs.push({ id, name: safeName(e), isInstalled: safeInstalled(e) });
+          }
+          if (arr.length < limit) break;
+        }
+        olog("company locations fallback", { count: locs.length });
+      }
+
+      // Persist each location top-level *and* under install doc
       const batch = db().batch();
       const now = FieldValue.serverTimestamp();
       for (const l of locs) {
@@ -252,33 +269,87 @@ export async function GET(request: Request) {
           },
           { merge: true }
         );
+
+        const installLocRef = installRef.collection("locations").doc(l.id);
+        batch.set(
+          installLocRef,
+          {
+            locationId: l.id,
+            name: l.name ?? null,
+            isInstalled: Boolean(l.isInstalled),
+            discoveredAt: now,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
       }
       await batch.commit();
 
-      // Mint per-location refresh tokens (best-effort)
+      // Mint & persist per-location refresh tokens (best effort)
       for (const l of locs) {
-        const resp = await fetch(ghlMintLocationTokenUrl(), {
-          method: "POST",
-          headers: { ...lcHeaders(tokens.access_token), "Content-Type": "application/json" },
-          body: JSON.stringify({ companyId: agencyId, locationId: l.id }),
-        });
-        if (!resp.ok) continue;
+        try {
+          const resp = await fetch(ghlMintLocationTokenUrl(), {
+            method: "POST",
+            headers: { ...lcHeaders(tokens.access_token), "Content-Type": "application/json" },
+            body: JSON.stringify({ companyId: agencyId, locationId: l.id }),
+          });
+          if (!resp.ok) {
+            const errTxt = await resp.text().catch(() => "");
+            olog("mint failed", { locationId: l.id, status: resp.status, body: errTxt.slice(0, 300) });
+            continue;
+          }
 
-        const body = (await resp.json()) as { data?: { refresh_token?: string }; refresh_token?: string };
-        const tok = body?.data?.refresh_token ?? body?.refresh_token ?? "";
-        if (!tok) continue;
+          const body = (await resp.json()) as { data?: { refresh_token?: string; scope?: string; expires_in?: number; token_type?: string } } & {
+            refresh_token?: string;
+            scope?: string;
+            expires_in?: number;
+            token_type?: string;
+          };
+          const mintedRefresh = body?.data?.refresh_token ?? body?.refresh_token ?? "";
+          const scopesApi = (body?.data?.scope ?? body?.scope ?? "").split(" ").filter(Boolean);
+          const expiresIn = Number(body?.data?.expires_in ?? body?.expires_in ?? 0) || 0;
+          const tokenType = String(body?.data?.token_type ?? body?.token_type ?? "");
 
-        await db()
-          .collection("locations")
-          .doc(l.id)
-          .set(
-            {
-              refreshToken: tok,
-              isInstalled: true,
-              updatedAt: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          );
+          if (!mintedRefresh) {
+            olog("mint missing refresh_token", { locationId: l.id });
+            continue;
+          }
+
+          // Save under top-level
+          await db()
+            .collection("locations")
+            .doc(l.id)
+            .set(
+              {
+                refreshToken: mintedRefresh,
+                isInstalled: true,
+                updatedAt: FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+
+          // And mirror under installs/{installId}/locations/{loc}
+          await installRef
+            .collection("locations")
+            .doc(l.id)
+            .set(
+              {
+                tokenMeta: {
+                  expiresIn: expiresIn,
+                  type: tokenType || tokens.token_type,
+                  savedAt: FieldValue.serverTimestamp(),
+                },
+                scopesApi,
+                scopesExpected: scopesApi, // or your constant expected scope string split
+                scopes: scopesApi,
+                isInstalled: true,
+                updatedAt: FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+        } catch (e) {
+          olog("mint error (non-fatal)", { locationId: l.id, err: String(e) });
+        }
       }
     }
   } catch (e) {
@@ -286,7 +357,7 @@ export async function GET(request: Request) {
     // non-fatal
   }
 
-  // 5) Send user to app
+  // 5) Redirect back to UI
   const returnTo = rtB64 ? Buffer.from(rtB64, "base64url").toString("utf8") : `${baseApp}/app`;
   const ui = new URL(returnTo);
   ui.searchParams.set("installed", "1");

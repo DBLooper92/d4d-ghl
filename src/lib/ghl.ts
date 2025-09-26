@@ -16,7 +16,6 @@ export const OAUTH_LOG_PREFIX = "[oauth]";
 
 export function olog(msg: string, details?: unknown) {
   if (!OAUTH_LOG) return;
-  // keep logs concise but useful
   console.info(
     `${OAUTH_LOG_PREFIX} ${msg}`,
     details ? JSON.stringify(details, (_k, v) => (Array.isArray(v) ? v.slice(0, 5) : v)) : ""
@@ -38,9 +37,6 @@ export function ghlAuthBase() {
 export function ghlTokenUrl() {
   return "https://services.leadconnectorhq.com/oauth/token";
 }
-export function ghlUsersMeUrl() {
-  return "https://services.leadconnectorhq.com/users/me";
-}
 
 export function ghlCompanyUrl(companyId: string) {
   return `https://services.leadconnectorhq.com/companies/${companyId}`;
@@ -49,6 +45,13 @@ export function ghlCompanyLocationsUrl(companyId: string, page = 1, limit = 200)
   const u = new URL(`https://services.leadconnectorhq.com/companies/${companyId}/locations`);
   u.searchParams.set("page", String(page));
   u.searchParams.set("limit", String(limit));
+  return u.toString();
+}
+export function ghlInstalledLocationsUrl(companyId: string, integrationId: string) {
+  const u = new URL(`https://services.leadconnectorhq.com/oauth/installedLocations`);
+  u.searchParams.set("companyId", companyId);
+  u.searchParams.set("appId", integrationId);
+  u.searchParams.set("isInstalled", "true");
   return u.toString();
 }
 export function ghlMintLocationTokenUrl() {
@@ -66,6 +69,7 @@ export function getGhlConfig() {
     scope: process.env.GHL_SCOPES || "",
     redirectUri, // computed from base + path
     baseApp,
+    integrationId: process.env.GHL_INTEGRATION_ID || "", // optional but enables installedLocations path
   };
 }
 
@@ -84,4 +88,41 @@ export function isCompany(userType?: string) {
 export function isLocation(userType?: string) {
   const t = String(userType || "").toLowerCase();
   return t === "location";
+}
+
+// ---------- Helpers for normalizing LC location payloads ----------
+export type AnyLoc = {
+  id?: string;
+  _id?: string;
+  locationId?: string;
+  name?: string;
+  isInstalled?: boolean;
+};
+export type LCListLocationsResponse = { locations?: AnyLoc[] } | AnyLoc[];
+
+export function pickLocs(json: unknown): AnyLoc[] {
+  if (Array.isArray(json)) return json.filter(isAnyLoc);
+  if (isObj(json) && Array.isArray((json as { locations?: unknown }).locations)) {
+    const arr = (json as { locations?: unknown }).locations;
+    return (arr as unknown[]).filter(isAnyLoc) as AnyLoc[];
+  }
+  return [];
+}
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+export function isAnyLoc(v: unknown): v is AnyLoc {
+  if (!isObj(v)) return false;
+  return "id" in v || "locationId" in v || "_id" in v;
+}
+export function safeId(l: AnyLoc): string | null {
+  const cands = [l.id, l.locationId, l._id].map((x) => (typeof x === "string" ? x.trim() : ""));
+  const id = cands.find((s) => s && s.length > 0);
+  return id ?? null;
+}
+export function safeName(l: AnyLoc): string | null {
+  return typeof l.name === "string" && l.name.trim() ? l.name : null;
+}
+export function safeInstalled(l: AnyLoc): boolean {
+  return Boolean(l.isInstalled);
 }
