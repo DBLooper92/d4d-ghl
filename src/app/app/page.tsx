@@ -1,4 +1,3 @@
-// File: src/app/app/page.tsx
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
@@ -8,7 +7,6 @@ type InstalledResp = {
   installed: boolean;
   agencyId: string | null;
   locationId: string | null;
-  // debug echo from API so you can see what it received
   _debug?: {
     href: string;
     qs: Record<string, string>;
@@ -17,6 +15,54 @@ type InstalledResp = {
     received: Record<string, string | undefined>;
   };
 };
+
+type EncryptedPayload = {
+  iv: string;         // base64url
+  cipherText: string; // base64url
+  tag: string;        // base64url
+};
+
+type RequestUserDataResponse = {
+  message: "REQUEST_USER_DATA_RESPONSE";
+  payload: EncryptedPayload;
+};
+
+async function getMarketplaceUserContext(): Promise<{
+  activeLocationId?: string;
+  activeCompanyId?: string;
+} | null> {
+  // Ask GHL parent for encrypted user data
+  const encrypted = await new Promise<EncryptedPayload | null>((resolve) => {
+    try {
+      window.parent.postMessage({ message: "REQUEST_USER_DATA" }, "*");
+      const onMsg = (ev: MessageEvent<unknown>) => {
+        const d = ev?.data as RequestUserDataResponse | undefined;
+        if (d && d.message === "REQUEST_USER_DATA_RESPONSE" && d.payload) {
+          window.removeEventListener("message", onMsg as EventListener);
+          resolve(d.payload);
+        }
+      };
+      window.addEventListener("message", onMsg as EventListener);
+    } catch {
+      resolve(null);
+    }
+  });
+
+  if (!encrypted) return null;
+
+  try {
+    const r = await fetch("/api/user-context/decode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ encryptedData: encrypted }),
+    });
+    if (!r.ok) return null;
+    const json = (await r.json()) as { activeLocationId?: string; activeCompanyId?: string };
+    return json;
+  } catch {
+    return null;
+  }
+}
 
 function pickLikelyLocationId({
   search,
@@ -27,20 +73,16 @@ function pickLikelyLocationId({
   hash: string;
   pathname: string;
 }) {
-  // 1) Query params (both styles)
   const fromQS =
     search.get("location_id") ||
     search.get("locationId") ||
     search.get("location") ||
     "";
-
   if (fromQS && fromQS.trim()) return fromQS.trim();
 
-  // 2) Hash (#location_id=… or #/location/ID, seen in some GHL contexts)
   if (hash) {
     try {
       const h = hash.startsWith("#") ? hash.slice(1) : hash;
-      // style: #location_id=TNxo…
       const asParams = new URLSearchParams(h);
       const fromHash =
         asParams.get("location_id") ||
@@ -48,18 +90,15 @@ function pickLikelyLocationId({
         asParams.get("location") ||
         "";
       if (fromHash && fromHash.trim()) return fromHash.trim();
-      // style: #/something/TNxoaN…
       const segs = h.split(/[/?&]/).filter(Boolean);
-      const maybeId = segs.find((s) => s.length >= 12); // GHL ids are long-ish
+      const maybeId = segs.find((s) => s.length >= 12);
       if (maybeId) return maybeId.trim();
     } catch {
       // ignore
     }
   }
 
-  // 3) Path segment (/app/TNxoaN…)
   const segs = pathname.split("/").filter(Boolean);
-  // if path is /app/<id>, the id will be the second segment
   const maybeId = segs.length >= 2 ? segs[1] : "";
   if (maybeId && maybeId.length >= 12) return maybeId.trim();
 
@@ -87,11 +126,11 @@ function DashboardInner() {
   });
   const [loading, setLoading] = useState(false);
 
-  // Compute robust ids from location.search / hash / pathname each render
+  // Derive IDs from URL each render
   const derived = useMemo(() => {
     const url = typeof window !== "undefined" ? new URL(window.location.href) : null;
     if (!url) {
-      return { locationId: state.locationId || null, agencyId: state.agencyId || null };
+      return { locationId: state.locationId || null, agencyId: state.agencyId || null, href: "" };
     }
     const locationId = pickLikelyLocationId({
       search: url.searchParams,
@@ -106,21 +145,34 @@ function DashboardInner() {
     };
   }, [state.locationId, state.agencyId]);
 
-  const shouldVerify = useMemo(
-    () => Boolean(derived.locationId || derived.agencyId),
-    [derived.locationId, derived.agencyId]
-  );
-
+  // Single effect handles both cases:
+  // - If we already have IDs ⇒ verify install immediately
+  // - Else ⇒ try SSO user context, then verify
   useEffect(() => {
     let cancelled = false;
+
     async function run() {
-      if (!shouldVerify) return;
       setLoading(true);
       try {
+        let agencyId = derived.agencyId ?? null;
+        let locationId = derived.locationId ?? null;
+
+        if (!agencyId && !locationId) {
+          // Try Marketplace SSO
+          const ctx = await getMarketplaceUserContext();
+          agencyId = ctx?.activeCompanyId ?? null;
+          locationId = ctx?.activeLocationId ?? null;
+        }
+
+        if (!agencyId && !locationId) {
+          // Nothing to verify yet; show connect CTA
+          if (!cancelled) setState((s) => ({ ...s, installed: false }));
+          return;
+        }
+
         const url = new URL("/api/installed", window.location.origin);
-        if (derived.locationId) url.searchParams.set("locationId", derived.locationId);
-        if (derived.agencyId) url.searchParams.set("agencyId", derived.agencyId);
-        // include a tiny debug flag so API echoes what it received (safe)
+        if (locationId) url.searchParams.set("locationId", locationId);
+        if (agencyId) url.searchParams.set("agencyId", agencyId);
         url.searchParams.set("_debug", "1");
 
         const r = await fetch(url.toString(), { cache: "no-store" });
@@ -128,21 +180,18 @@ function DashboardInner() {
         if (!cancelled) setState(json);
       } catch {
         if (!cancelled) {
-          setState({
-            installed: false,
-            agencyId: derived.agencyId || null,
-            locationId: derived.locationId || null,
-          });
+          setState((s) => ({ ...s, installed: false }));
         }
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
-    run();
+
+    void run();
     return () => {
       cancelled = true;
     };
-  }, [shouldVerify, derived.locationId, derived.agencyId]);
+  }, [derived.agencyId, derived.locationId]);
 
   return (
     <main style={{ padding: 24 }}>

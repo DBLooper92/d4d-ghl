@@ -16,10 +16,69 @@ import {
   ghlInstalledLocationsUrl,
   ghlCompanyLocationsUrl,
   ghlMintLocationTokenUrl,
+  ghlCustomMenusUrl,
 } from "@/lib/ghl";
 import { FieldValue } from "firebase-admin/firestore";
 
 export const runtime = "nodejs"; // Node APIs for crypto/cookies
+
+// Types for Custom Menu API
+type CustomMenu = {
+  id: string;
+  title: string;
+  url: string;
+  placement?: string;
+  openMode?: string;
+  visibility?: { agency?: boolean; subAccount?: boolean };
+};
+type CustomMenuListResponse = CustomMenu[] | { items?: CustomMenu[] };
+
+// Ensure a CML exists for this company
+async function ensureCml(accessToken: string, companyId: string) {
+  const base = ghlCustomMenusUrl();
+
+  // 1) List existing (idempotency)
+  const list = await fetch(`${base}?companyId=${encodeURIComponent(companyId)}`, {
+    headers: lcHeaders(accessToken),
+    cache: "no-store",
+  });
+
+  if (list.ok) {
+    let menus: CustomMenu[] = [];
+    const payload = (await list.json().catch(() => null)) as CustomMenuListResponse | null;
+    if (payload) {
+      menus = Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : [];
+    }
+    const exists = menus.some(
+      (m) =>
+        (m.title || "").toLowerCase() === "driving for dollars" &&
+        typeof m.url === "string" &&
+        m.url.startsWith("https://app.driving4dollars.co/app")
+    );
+    if (exists) return;
+  }
+
+  // 2) Create (Left Sidebar, iFrame, visible in sub-accounts)
+  const body: CustomMenu = {
+    id: "",
+    title: "Driving for Dollars",
+    url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
+    placement: "LEFT_SIDEBAR",
+    openMode: "IFRAME",
+    visibility: { agency: false, subAccount: true },
+  };
+
+  const create = await fetch(base, {
+    method: "POST",
+    headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, companyId }),
+  });
+
+  if (!create.ok) {
+    const txt = await create.text().catch(() => "");
+    olog("CML create failed", { status: create.status, body: txt.slice(0, 400) });
+  }
+}
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -105,8 +164,7 @@ export async function GET(request: Request) {
   const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 2) Upsert agencies/{agencyId} with agency-level refresh token + metadata
-  //    (doc id = agencyId). Also create/update subcollection agencies/{agencyId}/locations later.
+  // 2) Upsert agency document
   // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId) {
     const agenciesRef = db().collection("agencies").doc(agencyId);
@@ -118,7 +176,6 @@ export async function GET(request: Request) {
         agencyId,
         provider: "leadconnector",
         scopes: scopeArr,
-        // Save the latest refresh token if present (agency token on Company installs)
         ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
         installedAt: isNewAgency ? FieldValue.serverTimestamp() : snap.get("installedAt") ?? FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
@@ -128,20 +185,16 @@ export async function GET(request: Request) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 3) If this was a Location install, persist that single location both top-level
-  //    and under agencies/{agencyId}/locations/{locationId}
+  // 3) If Location install, persist that single location
   // ─────────────────────────────────────────────────────────────────────────────
   if (agencyId && locationId) {
-    // Top-level locations/{locationId}
     await db().collection("locations").doc(locationId).set(
       {
         locationId,
         agencyId,
         provider: "leadconnector",
-        // For a Location install, this is a location-scoped refresh token
         ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
         isInstalled: true,
-        // Name is unknown at this point; it will be set during discovery/refresh paths
         name: null,
         installedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
@@ -149,7 +202,6 @@ export async function GET(request: Request) {
       { merge: true }
     );
 
-    // agencies/{agencyId}/locations/{locationId}
     await db()
       .collection("agencies")
       .doc(agencyId)
@@ -168,14 +220,10 @@ export async function GET(request: Request) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 4) Company-level path: discover locations & mint per-location tokens
-  //    Writes to:
-  //      - locations/{locationId} (top-level)
-  //      - agencies/{agencyId}/locations/{locationId}
+  // 4) Company-level discovery + mint per-location tokens (best effort)
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     if (agencyId && installationTarget === "Company") {
-      // First try the “installed locations” endpoint if we know our app/integration id
       let locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
       if (integrationId) {
         try {
@@ -197,7 +245,6 @@ export async function GET(request: Request) {
         }
       }
 
-      // Fallback to listing *all* company locations
       if (!locs.length) {
         const limit = 200;
         for (let page = 1; page < 999; page++) {
@@ -219,12 +266,10 @@ export async function GET(request: Request) {
         olog("company locations fallback", { count: locs.length });
       }
 
-      // Persist locations to both places (top-level & under agency subcollection)
       const batch = db().batch();
       const now = FieldValue.serverTimestamp();
 
       for (const l of locs) {
-        // Top-level: locations/{locationId}
         const locRef = db().collection("locations").doc(l.id);
         batch.set(
           locRef,
@@ -240,7 +285,6 @@ export async function GET(request: Request) {
           { merge: true }
         );
 
-        // agencies/{agencyId}/locations/{locationId}
         const agencyLocRef = db().collection("agencies").doc(agencyId).collection("locations").doc(l.id);
         batch.set(
           agencyLocRef,
@@ -256,7 +300,6 @@ export async function GET(request: Request) {
       }
       await batch.commit();
 
-      // Mint & persist per-location refresh tokens (best effort)
       for (const l of locs) {
         try {
           const resp = await fetch(ghlMintLocationTokenUrl(), {
@@ -271,8 +314,8 @@ export async function GET(request: Request) {
           }
 
           const body = (await resp.json()) as {
-            data?: { refresh_token?: string; scope?: string; expires_in?: number; token_type?: string };
-            refresh_token?: string; scope?: string; expires_in?: number; token_type?: string;
+            data?: { refresh_token?: string };
+            refresh_token?: string;
           };
 
           const mintedRefresh = body?.data?.refresh_token ?? body?.refresh_token ?? "";
@@ -281,7 +324,6 @@ export async function GET(request: Request) {
             continue;
           }
 
-          // Save refresh token under top-level locations/{locationId}
           await db().collection("locations").doc(l.id).set(
             {
               refreshToken: mintedRefresh,
@@ -297,7 +339,17 @@ export async function GET(request: Request) {
     }
   } catch (e) {
     olog("location discovery/mint error", { message: (e as Error).message });
-    // non-fatal
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 4.5) Ensure the Custom Menu Link exists for this agency (idempotent)
+  // ─────────────────────────────────────────────────────────────────────────────
+  if (agencyId) {
+    try {
+      await ensureCml(tokens.access_token, agencyId);
+    } catch (e) {
+      olog("ensureCml error (non-fatal)", { err: String(e) });
+    }
   }
 
   // 5) Redirect back to UI

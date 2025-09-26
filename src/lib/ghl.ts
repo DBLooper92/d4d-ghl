@@ -67,9 +67,9 @@ export function getGhlConfig() {
     clientId: required("GHL_CLIENT_ID"),
     clientSecret: required("GHL_CLIENT_SECRET"),
     scope: process.env.GHL_SCOPES || "",
-    redirectUri, // computed from base + path
+    redirectUri,
     baseApp,
-    integrationId: process.env.GHL_INTEGRATION_ID || "", // optional but enables installedLocations path
+    integrationId: process.env.GHL_INTEGRATION_ID || "",
   };
 }
 
@@ -125,4 +125,8 @@ export function safeName(l: AnyLoc): string | null {
 }
 export function safeInstalled(l: AnyLoc): boolean {
   return Boolean(l.isInstalled);
+}
+
+export function ghlCustomMenusUrl() {
+  return "https://services.leadconnectorhq.com/custom-menus";
 }
