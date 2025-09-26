@@ -11,20 +11,25 @@ function truthyStr(v: unknown) {
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
-  // Accept several aliases (GHL uses snake_case in CML)
+  // Accept several aliases (GHL can be inconsistent across contexts)
   const locationIdRaw =
     url.searchParams.get("location_id") ||
     url.searchParams.get("locationId") ||
     url.searchParams.get("location") ||
+    url.searchParams.get("subAccountId") ||
+    url.searchParams.get("accountId") ||
     "";
 
   const agencyIdRaw =
     url.searchParams.get("agency_id") ||
     url.searchParams.get("agencyId") ||
+    url.searchParams.get("companyId") ||
     "";
 
-  const locationIdIn = locationIdRaw.trim();
-  const agencyIdIn = agencyIdRaw.trim();
+  const wantDebug = url.searchParams.get("_debug") === "1";
+
+  const locationIdIn = (locationIdRaw || "").trim();
+  const agencyIdIn = (agencyIdRaw || "").trim();
 
   let installed = false;
   let agencyId: string | null = null;
@@ -38,6 +43,7 @@ export async function GET(req: Request) {
         const data = locSnap.data() || {};
         finalLocationId = locationIdIn;
         agencyId = (data.agencyId as string) || null;
+        // consider installed if either refreshToken exists or isInstalled flag is true
         installed = Boolean(data.refreshToken) || Boolean(data.isInstalled);
       }
     } else if (truthyStr(agencyIdIn)) {
@@ -68,16 +74,56 @@ export async function GET(req: Request) {
       }
     }
   } catch {
-    // Swallow errors; return a safe response
+    // Keep errors non-fatal for the UI
   }
 
+  const base = {
+    installed,
+    agencyId,
+    locationId: finalLocationId,
+  };
+
+  if (!wantDebug) {
+    return NextResponse.json(base, {
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Robots-Tag": "noindex",
+      },
+    });
+  }
+
+  // Debug echo (safe; contains only URL + what we parsed)
+  const href = req.url;
+  const u = new URL(href);
+  const qs: Record<string, string> = {};
+  u.searchParams.forEach((v, k) => (qs[k] = v));
+  const pathSegs = u.pathname.split("/").filter(Boolean);
+
   return NextResponse.json(
-    { installed, agencyId, locationId: finalLocationId },
+    {
+      ...base,
+      _debug: {
+        href,
+        qs,
+        hash: u.hash,
+        pathSegs,
+        received: {
+          location_id: url.searchParams.get("location_id") || undefined,
+          locationId: url.searchParams.get("locationId") || undefined,
+          location: url.searchParams.get("location") || undefined,
+          subAccountId: url.searchParams.get("subAccountId") || undefined,
+          accountId: url.searchParams.get("accountId") || undefined,
+          agency_id: url.searchParams.get("agency_id") || undefined,
+          agencyId: url.searchParams.get("agencyId") || undefined,
+          companyId: url.searchParams.get("companyId") || undefined,
+        },
+      },
+    },
     {
       status: 200,
       headers: {
         "Cache-Control": "no-store",
-        // Helpful for embeds
         "X-Robots-Tag": "noindex",
       },
     }
