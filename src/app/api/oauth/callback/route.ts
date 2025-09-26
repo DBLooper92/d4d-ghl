@@ -33,12 +33,11 @@ type CustomMenu = {
 };
 type CustomMenuListResponse = CustomMenu[] | { items?: CustomMenu[] };
 
-// Ensure a CML exists for this company
 async function ensureCml(accessToken: string, companyId: string) {
-  const base = ghlCustomMenusUrl();
+  const base = ghlCustomMenusUrl(companyId);
 
   // 1) List existing (idempotency)
-  const list = await fetch(`${base}?companyId=${encodeURIComponent(companyId)}`, {
+  const list = await fetch(base, {
     headers: lcHeaders(accessToken),
     cache: "no-store",
   });
@@ -59,19 +58,18 @@ async function ensureCml(accessToken: string, companyId: string) {
   }
 
   // 2) Create (Left Sidebar, iFrame, visible in sub-accounts)
-  const body: CustomMenu = {
-    id: "",
+  const createPayload = {
     title: "Driving for Dollars",
     url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
     placement: "LEFT_SIDEBAR",
     openMode: "IFRAME",
     visibility: { agency: false, subAccount: true },
-  };
+  } as const;
 
   const create = await fetch(base, {
     method: "POST",
     headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, companyId }),
+    body: JSON.stringify(createPayload),
   });
 
   if (!create.ok) {
