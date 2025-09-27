@@ -94,13 +94,11 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
   const createUrl = base;
 
   // Try several icon families/names that commonly exist across tenants
-  const iconAttempts = [
-    { fontFamily: "lucide", name: "car" },
-    { fontFamily: "fontAwesome", name: "car" },
-    { fontFamily: "material", name: "directions_car" },
-    { fontFamily: "remix", name: "car-fill" },
-    { fontFamily: "lineawesome", name: "car" },
-  ] as const;
+const iconAttempts = [
+  { fontFamily: "fas", name: "car" }, // Font Awesome Solid
+  { fontFamily: "fab", name: "car" }, // Font Awesome Brands
+  { fontFamily: "far", name: "car" }, // Font Awesome Regular
+] as const;
 
   const userRoleAttempts = ["all", "admin", "user"] as const;
   const openModeAttempts = ["iframe", "current_tab"] as const;
