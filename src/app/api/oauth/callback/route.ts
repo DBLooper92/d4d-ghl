@@ -15,16 +15,14 @@ type CustomMenuLink = {
   allowMicrophone?: boolean;
 };
 
-
 type TokenResponse = {
   access_token: string;
   token_type: string;
   refresh_token?: string;
   expires_in?: number;
   scope?: string;
-  // GHL sometimes includes these
   locationId?: string | null;
-  companyId?: string | null; // "agencyId" in your logs
+  companyId?: string | null; // agencyId in logs
 };
 
 // ====== Env helpers ======
@@ -32,11 +30,9 @@ const {
   GHL_OAUTH_CLIENT_ID = "",
   GHL_OAUTH_CLIENT_SECRET = "",
   GHL_OAUTH_REDIRECT_URI = "",
-  // API base (prod or sandbox). Keep as-is or adjust if you use a proxy.
   GHL_API_BASE = "https://services.leadconnectorhq.com",
 } = process.env;
 
-// App URL you want to install as a CML target
 const APP_BASE_URL = process.env.APP_BASE_URL ?? "https://app.driving4dollars.co";
 
 // ====== Small utilities ======
@@ -52,15 +48,13 @@ const errlog = (msg: string, meta?: unknown) => {
   else console.error(msg);
 };
 
-// Build headers for LeadConnector API calls
 const lcHeaders = (accessToken: string): HeadersInit => ({
   Authorization: `Bearer ${accessToken}`,
   "Content-Type": "application/json",
   Accept: "application/json",
-  Version: "2021-07-28", // stable LC API version header commonly required
+  Version: "2021-07-28",
 });
 
-// Be tolerant to the two common list shapes (array or { items: [] })
 function toMenuList(r: unknown): CustomMenuLink[] {
   if (Array.isArray(r)) return r as CustomMenuLink[];
   if (r && typeof r === "object") {
@@ -70,7 +64,6 @@ function toMenuList(r: unknown): CustomMenuLink[] {
   return [];
 }
 
-// Fetch helper that captures text + parsed JSON (as unknown)
 async function fetchWithBody(
   url: string,
   init: RequestInit
@@ -106,7 +99,7 @@ async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
 
   if (!res.ok) {
     throw new Error(
-      `Token exchange failed (${res.status}): ${res.bodyText || res.json ? json(res.json) : ""}`
+      `Token exchange failed (${res.status}): ${res.bodyText || (res.json ? json(res.json) : "")}`
     );
   }
 
@@ -118,7 +111,6 @@ async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
 type WhoAmIResponse = {
   locationId?: string | null;
   companyId?: string | null;
-  // userType etc might exist; we only need ids
 };
 
 async function whoAmI(accessToken: string): Promise<WhoAmIResponse> {
@@ -132,13 +124,10 @@ async function whoAmI(accessToken: string): Promise<WhoAmIResponse> {
   return (res.json || {}) as WhoAmIResponse;
 }
 
-// Some installs come in at agency (company) scope; some at location scope.
-// Try to infer a good target for the CML.
 async function deriveInstallTarget(
   accessToken: string
 ): Promise<{ agencyId: string | null; locationId: string | null }> {
   const info = await whoAmI(accessToken);
-  // Prefer company/agencyId; fall back to locationId
   return {
     agencyId: info.companyId ?? null,
     locationId: info.locationId ?? null,
@@ -146,18 +135,13 @@ async function deriveInstallTarget(
 }
 
 // ====== Custom Menu Link (CML) handlers ======
-
 const CML_TITLE = "Driving for Dollars";
 const CML_URL = `${APP_BASE_URL}/app`;
 
-// List existing CMLs (company or location)
 async function listCmls(
   accessToken: string,
   scope: { agencyId?: string | null; locationId?: string | null }
 ): Promise<CustomMenuLink[]> {
-  // Base endpoint used by newer LC routes:
-  // - Company scope: /custom-menu-links?companyId=...
-  // - Location scope: /custom-menu-links?locationId=...
   const qs = new URLSearchParams();
   if (scope.agencyId) qs.set("companyId", scope.agencyId);
   if (scope.locationId) qs.set("locationId", scope.locationId);
@@ -171,7 +155,6 @@ async function listCmls(
   });
 
   if (!attempt.ok) {
-    // Some accounts may not support the base list; return empty and let create path decide
     log("[oauth] CML list non-OK", { status: attempt.status, sample: attempt.bodyText });
     return [];
   }
@@ -179,10 +162,6 @@ async function listCmls(
   return toMenuList(attempt.json);
 }
 
-// Try multiple create strategies because LC tenants differ.
-// Strategy A: POST /custom-menu-links with body containing companyId/locationId
-// Strategy B: POST /custom-menu-links/companies/:companyId
-// Strategy C: POST /custom-menu-links/locations/:locationId
 async function createCml(
   accessToken: string,
   scope: { agencyId?: string | null; locationId?: string | null }
@@ -203,7 +182,7 @@ async function createCml(
     ...(scope.locationId ? { locationId: scope.locationId } : {}),
   };
 
-  // --- Strategy A: base endpoint (preferred) ---
+  // Strategy A: base endpoint
   {
     const url = `${GHL_API_BASE}/custom-menu-links`;
     const res = await fetchWithBody(url, {
@@ -221,7 +200,7 @@ async function createCml(
     });
   }
 
-  // --- Strategy B: nested company endpoint ---
+  // Strategy B: nested company endpoint
   if (scope.agencyId) {
     const url = `${GHL_API_BASE}/custom-menu-links/companies/${encodeURIComponent(
       scope.agencyId
@@ -250,7 +229,7 @@ async function createCml(
     });
   }
 
-  // --- Strategy C: nested location endpoint ---
+  // Strategy C: nested location endpoint
   if (scope.locationId) {
     const url = `${GHL_API_BASE}/custom-menu-links/locations/${encodeURIComponent(
       scope.locationId
@@ -286,7 +265,6 @@ async function createCml(
   return false;
 }
 
-// Ensure the CML exists (idempotent)
 async function ensureCml(accessToken: string, agencyId: string | null, locationId: string | null) {
   log("[oauth] ensureCml precheck", {
     companyId: agencyId,
@@ -294,19 +272,13 @@ async function ensureCml(accessToken: string, agencyId: string | null, locationI
     hasRead: true,
   });
 
-  // 1) List and see if it already exists
   const existing = await listCmls(accessToken, { agencyId, locationId });
   const exists = existing.some((m: CustomMenuLink) => {
     const title = (m.title || "").toLowerCase();
-    return (
-      title === CML_TITLE.toLowerCase() &&
-      typeof m.url === "string" &&
-      m.url.startsWith(CML_URL)
-    );
+    return title === CML_TITLE.toLowerCase() && typeof m.url === "string" && m.url.startsWith(CML_URL);
   });
   if (exists) return true;
 
-  // 2) Try to create
   return await createCml(accessToken, { agencyId, locationId });
 }
 
@@ -320,36 +292,29 @@ export async function GET(req: Request) {
   }
 
   try {
-    // 1) Exchange code for token
     const token = await exchangeCodeForToken(code);
 
     const accessToken = token.access_token;
     const tokenSnapshot = {
-      userTypeForToken: "(none)", // left generic; user type isn’t strictly needed
+      userTypeForToken: "(none)",
       hasCompanyId: Boolean(token.companyId),
       hasLocationId: Boolean(token.locationId),
     };
     log("[oauth] token snapshot", tokenSnapshot);
 
-    // 2) Discover where to install (company vs. location)
-    // Prefer company/agency install as in your logs
     const target = await deriveInstallTarget(accessToken);
 
-    // For log parity with your traces
     const installedLocations = target.locationId ? 1 : 0;
     log("[oauth] installedLocations discovered", { count: installedLocations });
     if (!installedLocations) {
       log("[oauth] company locations fallback", { count: 0 });
     }
 
-    // 3) Ensure the Custom Menu Link exists
     const ok = await ensureCml(accessToken, target.agencyId, target.locationId);
     if (!ok) {
-      // Continue anyway — you still want to complete OAuth and land in the app.
-      // The logs will show the create attempts.
+      // proceed anyway; logging captures why
     }
 
-    // 4) Redirect to your app shell so the marketplace can close out the install flow
     const derivedInstallTarget = target.agencyId ? "Company" : "Location";
     log("[oauth] oauth success", {
       userTypeQuery: "",
@@ -374,17 +339,12 @@ export async function GET(req: Request) {
       ...(target.locationId ? { locationId: target.locationId } : {}),
     });
 
-    // Using your App Hosting domain (served by Next)
     const appUrl = `${APP_BASE_URL}/app?${redirectQs.toString()}`;
-
     return NextResponse.redirect(appUrl, { status: 302 });
   } catch (e) {
     errlog("[oauth] callback error", { message: (e as Error).message });
     return NextResponse.json(
-      {
-        error: "OAuth callback failed",
-        detail: (e as Error).message,
-      },
+      { error: "OAuth callback failed", detail: (e as Error).message },
       { status: 500 }
     );
   }
