@@ -1,6 +1,6 @@
 // File: src/app/api/oauth/callback/route.ts
 import { NextResponse } from "next/server";
-import { getGhlConfig, ghlTokenUrl } from "@/lib/ghl";
+import { ghlTokenUrl } from "@/lib/ghl";
 
 export const runtime = "nodejs";
 
@@ -30,16 +30,8 @@ type TokenResponse = {
 
 // ====== Small utilities ======
 const json = (o: unknown) => JSON.stringify(o);
-
-const log = (msg: string, meta?: unknown) => {
-  if (meta) console.log(msg, json(meta));
-  else console.log(msg);
-};
-
-const errlog = (msg: string, meta?: unknown) => {
-  if (meta) console.error(msg, json(meta));
-  else console.error(msg);
-};
+const log = (msg: string, meta?: unknown) => (meta ? console.log(msg, json(meta)) : console.log(msg));
+const errlog = (msg: string, meta?: unknown) => (meta ? console.error(msg, json(meta)) : console.error(msg));
 
 const lcHeaders = (accessToken: string): HeadersInit => ({
   Authorization: `Bearer ${accessToken}`,
@@ -47,15 +39,6 @@ const lcHeaders = (accessToken: string): HeadersInit => ({
   Accept: "application/json",
   Version: "2021-07-28",
 });
-
-function toMenuList(r: unknown): CustomMenuLink[] {
-  if (Array.isArray(r)) return r as CustomMenuLink[];
-  if (r && typeof r === "object") {
-    const maybe = r as { items?: unknown };
-    if (Array.isArray(maybe.items)) return maybe.items as CustomMenuLink[];
-  }
-  return [];
-}
 
 async function fetchWithBody(
   url: string,
@@ -72,9 +55,56 @@ async function fetchWithBody(
   return { ok: r.ok, status: r.status, bodyText, json: parsed };
 }
 
-// ====== OAuth exchange (uses getGhlConfig) ======
+function toMenuList(r: unknown): CustomMenuLink[] {
+  if (Array.isArray(r)) return r as CustomMenuLink[];
+  if (r && typeof r === "object") {
+    const maybe = r as { items?: unknown };
+    if (Array.isArray(maybe.items)) return maybe.items as CustomMenuLink[];
+  }
+  return [];
+}
+
+// ====== Config loader (NO throws at import time, supports both env name styles) ======
+function loadOauthConfig() {
+  // Primary (your current setup via apphosting.yaml)
+  let clientId = process.env.GHL_CLIENT_ID ?? "";
+  let clientSecret = process.env.GHL_CLIENT_SECRET ?? "";
+  const baseApp = process.env.NEXT_PUBLIC_APP_BASE_URL || "http://localhost:3000";
+  const redirectPath = process.env.GHL_REDIRECT_PATH || "/api/oauth/callback";
+  let redirectUri = `${baseApp}${redirectPath}`;
+
+  // Fallback to legacy names if present (in case secrets are set under old keys)
+  if (!clientId || !clientSecret) {
+    clientId = process.env.GHL_OAUTH_CLIENT_ID ?? clientId;
+    clientSecret = process.env.GHL_OAUTH_CLIENT_SECRET ?? clientSecret;
+    redirectUri = process.env.GHL_OAUTH_REDIRECT_URI || redirectUri;
+  }
+
+  return { clientId: String(clientId || ""), clientSecret: String(clientSecret || ""), baseApp, redirectUri };
+}
+
+// Compute CML URL without importing other helpers (avoid early env access)
+const CML_TITLE = "Driving for Dollars";
+const CML_URL = `${process.env.NEXT_PUBLIC_APP_BASE_URL || "http://localhost:3000"}/app`;
+
+// ====== OAuth exchange (uses the loader above) ======
 async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
-  const { clientId, clientSecret, redirectUri } = getGhlConfig();
+  const { clientId, clientSecret, redirectUri } = loadOauthConfig();
+
+  // Hard fail (don’t send an empty POST that yields 422)
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      `Missing OAuth creds at runtime: hasClientId=${Boolean(clientId)} hasClientSecret=${Boolean(
+        clientSecret
+      )} redirectUri=${redirectUri}`
+    );
+  }
+
+  log("[oauth] token exchange start", {
+    hasClientId: true,
+    hasClientSecret: true,
+    redirectUri,
+  });
 
   const form = new URLSearchParams({
     client_id: clientId,
@@ -100,7 +130,7 @@ async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
   return res.json as TokenResponse;
 }
 
-// ====== Helpers to identify install target ======
+// ====== Identify install target ======
 type WhoAmIResponse = {
   locationId?: string | null;
   companyId?: string | null;
@@ -129,11 +159,7 @@ async function deriveInstallTarget(
   };
 }
 
-// ====== Custom Menu Link (CML) handlers ======
-const { baseApp } = getGhlConfig();
-const CML_TITLE = "Driving for Dollars";
-const CML_URL = `${baseApp}/app`;
-
+// ====== CML handlers ======
 async function listCmls(
   accessToken: string,
   scope: { agencyId?: string | null; locationId?: string | null }
@@ -178,7 +204,7 @@ async function createCml(
     ...(scope.locationId ? { locationId: scope.locationId } : {}),
   };
 
-  // Strategy A: base endpoint
+  // A) base endpoint
   {
     const url = `${GHL_API_BASE}/custom-menu-links`;
     const res = await fetchWithBody(url, {
@@ -190,17 +216,12 @@ async function createCml(
 
     if (res.ok) return true;
 
-    log("[oauth] ensureCml base-create attempt failed", {
-      status: res.status,
-      sample: res.bodyText,
-    });
+    log("[oauth] ensureCml base-create attempt failed", { status: res.status, sample: res.bodyText });
   }
 
-  // Strategy B: nested company endpoint
+  // B) nested company endpoint
   if (scope.agencyId) {
-    const url = `${GHL_API_BASE}/custom-menu-links/companies/${encodeURIComponent(
-      scope.agencyId
-    )}`;
+    const url = `${GHL_API_BASE}/custom-menu-links/companies/${encodeURIComponent(scope.agencyId)}`;
     const body = {
       title: commonBody.title,
       url: commonBody.url,
@@ -219,17 +240,12 @@ async function createCml(
 
     if (res.ok) return true;
 
-    log("[oauth] ensureCml nested-create attempt failed", {
-      status: res.status,
-      sample: res.bodyText,
-    });
+    log("[oauth] ensureCml nested-create attempt failed", { status: res.status, sample: res.bodyText });
   }
 
-  // Strategy C: nested location endpoint
+  // C) nested location endpoint
   if (scope.locationId) {
-    const url = `${GHL_API_BASE}/custom-menu-links/locations/${encodeURIComponent(
-      scope.locationId
-    )}`;
+    const url = `${GHL_API_BASE}/custom-menu-links/locations/${encodeURIComponent(scope.locationId)}`;
     const body = {
       title: commonBody.title,
       url: commonBody.url,
@@ -248,25 +264,15 @@ async function createCml(
 
     if (res.ok) return true;
 
-    log("[oauth] ensureCml nested-create attempt failed", {
-      status: res.status,
-      sample: res.bodyText,
-    });
+    log("[oauth] ensureCml nested-create attempt failed", { status: res.status, sample: res.bodyText });
   }
 
-  log("[oauth] CML create failed", {
-    status: 0,
-    body: "exhausted all create strategies (base + nested) with conservative payload",
-  });
+  log("[oauth] CML create failed", { status: 0, body: "exhausted strategies" });
   return false;
 }
 
 async function ensureCml(accessToken: string, agencyId: string | null, locationId: string | null) {
-  log("[oauth] ensureCml precheck", {
-    companyId: agencyId,
-    hasWrite: true,
-    hasRead: true,
-  });
+  log("[oauth] ensureCml precheck", { companyId: agencyId, hasWrite: true, hasRead: true });
 
   const existing = await listCmls(accessToken, { agencyId, locationId });
   const exists = existing.some((m: CustomMenuLink) => {
@@ -288,22 +294,26 @@ export async function GET(req: Request) {
   }
 
   try {
+    // Quick visibility on env presence in logs (no secrets printed)
+    const cfg = loadOauthConfig();
+    log("[oauth] cfg snapshot", {
+      hasClientId: Boolean(cfg.clientId),
+      hasClientSecret: Boolean(cfg.clientSecret),
+      redirectUri: cfg.redirectUri,
+    });
+
     const token = await exchangeCodeForToken(code);
 
     const accessToken = token.access_token;
-    const tokenSnapshot = {
+    log("[oauth] token snapshot", {
       hasCompanyId: Boolean(token.companyId),
       hasLocationId: Boolean(token.locationId),
-    };
-    log("[oauth] token snapshot", tokenSnapshot);
+    });
 
     const target = await deriveInstallTarget(accessToken);
 
     const installedLocations = target.locationId ? 1 : 0;
     log("[oauth] installedLocations discovered", { count: installedLocations });
-    if (!installedLocations) {
-      log("[oauth] company locations fallback", { count: 0 });
-    }
 
     const ok = await ensureCml(accessToken, target.agencyId, target.locationId);
     if (!ok) {
@@ -316,8 +326,7 @@ export async function GET(req: Request) {
       ...(target.locationId ? { locationId: target.locationId } : {}),
     });
 
-    const { baseApp } = getGhlConfig();
-    const appUrl = `${baseApp}/app?${redirectQs.toString()}`;
+    const appUrl = `${cfg.baseApp}/app?${redirectQs.toString()}`;
     return NextResponse.redirect(appUrl, { status: 302 });
   } catch (e) {
     errlog("[oauth] callback error", { message: (e as Error).message });
