@@ -1,7 +1,10 @@
-// src/app/api/oauth/callback/route.ts
+// File: src/app/api/oauth/callback/route.ts
 import { NextResponse } from "next/server";
+import { getGhlConfig, ghlTokenUrl } from "@/lib/ghl";
 
-// ====== Types (no `any`) ======
+export const runtime = "nodejs";
+
+// ====== Types ======
 type UserRole = "all" | "admin" | "user";
 type OpenMode = "iframe" | "current_tab";
 
@@ -22,18 +25,8 @@ type TokenResponse = {
   expires_in?: number;
   scope?: string;
   locationId?: string | null;
-  companyId?: string | null; // agencyId in logs
+  companyId?: string | null; // agency/company
 };
-
-// ====== Env helpers ======
-const {
-  GHL_OAUTH_CLIENT_ID = "",
-  GHL_OAUTH_CLIENT_SECRET = "",
-  GHL_OAUTH_REDIRECT_URI = "",
-  GHL_API_BASE = "https://services.leadconnectorhq.com",
-} = process.env;
-
-const APP_BASE_URL = process.env.APP_BASE_URL ?? "https://app.driving4dollars.co";
 
 // ====== Small utilities ======
 const json = (o: unknown) => JSON.stringify(o);
@@ -79,18 +72,19 @@ async function fetchWithBody(
   return { ok: r.ok, status: r.status, bodyText, json: parsed };
 }
 
-// ====== OAuth exchange ======
+// ====== OAuth exchange (uses getGhlConfig) ======
 async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
-  const url = `${GHL_API_BASE}/oauth/token`;
+  const { clientId, clientSecret, redirectUri } = getGhlConfig();
+
   const form = new URLSearchParams({
-    client_id: GHL_OAUTH_CLIENT_ID,
-    client_secret: GHL_OAUTH_CLIENT_SECRET,
+    client_id: clientId,
+    client_secret: clientSecret,
     grant_type: "authorization_code",
     code,
-    redirect_uri: GHL_OAUTH_REDIRECT_URI,
+    redirect_uri: redirectUri,
   });
 
-  const res = await fetchWithBody(url, {
+  const res = await fetchWithBody(ghlTokenUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form.toString(),
@@ -103,8 +97,7 @@ async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
     );
   }
 
-  const token = res.json as TokenResponse;
-  return token;
+  return res.json as TokenResponse;
 }
 
 // ====== Helpers to identify install target ======
@@ -112,6 +105,8 @@ type WhoAmIResponse = {
   locationId?: string | null;
   companyId?: string | null;
 };
+
+const GHL_API_BASE = "https://services.leadconnectorhq.com";
 
 async function whoAmI(accessToken: string): Promise<WhoAmIResponse> {
   const url = `${GHL_API_BASE}/oauth/userinfo`;
@@ -135,8 +130,9 @@ async function deriveInstallTarget(
 }
 
 // ====== Custom Menu Link (CML) handlers ======
+const { baseApp } = getGhlConfig();
 const CML_TITLE = "Driving for Dollars";
-const CML_URL = `${APP_BASE_URL}/app`;
+const CML_URL = `${baseApp}/app`;
 
 async function listCmls(
   accessToken: string,
@@ -296,7 +292,6 @@ export async function GET(req: Request) {
 
     const accessToken = token.access_token;
     const tokenSnapshot = {
-      userTypeForToken: "(none)",
       hasCompanyId: Boolean(token.companyId),
       hasLocationId: Boolean(token.locationId),
     };
@@ -315,31 +310,14 @@ export async function GET(req: Request) {
       // proceed anyway; logging captures why
     }
 
-    const derivedInstallTarget = target.agencyId ? "Company" : "Location";
-    log("[oauth] oauth success", {
-      userTypeQuery: "",
-      derivedInstallTarget,
-      agencyId: target.agencyId,
-      locationId: target.locationId,
-      scopes: [
-        "locations.readonly",
-        "oauth.readonly",
-        "custom-menu-link.readonly",
-        "custom-menu-link.write",
-        "contacts.readonly",
-        "contacts.write",
-        "opportunities.readonly",
-        "opportunities.write",
-      ],
-    });
-
     const redirectQs = new URLSearchParams({
       installed: "1",
       ...(target.agencyId ? { agencyId: target.agencyId } : {}),
       ...(target.locationId ? { locationId: target.locationId } : {}),
     });
 
-    const appUrl = `${APP_BASE_URL}/app?${redirectQs.toString()}`;
+    const { baseApp } = getGhlConfig();
+    const appUrl = `${baseApp}/app?${redirectQs.toString()}`;
     return NextResponse.redirect(appUrl, { status: 302 });
   } catch (e) {
     errlog("[oauth] callback error", { message: (e as Error).message });
