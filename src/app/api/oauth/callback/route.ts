@@ -19,7 +19,6 @@ import {
   ghlCustomMenusBase,
   CML_SCOPES,
   scopeListFromTokenScope,
-  CML_OPEN_MODE_CANDIDATES,
   CustomMenuListResponse,
 } from "@/lib/ghl";
 import { FieldValue } from "firebase-admin/firestore";
@@ -28,11 +27,11 @@ export const runtime = "nodejs"; // Node APIs for crypto/cookies
 
 /**
  * Ensure a Custom Menu Link exists for this agency.
- * - Verifies the token has the right scopes
- * - GETs current menus (supports both URL shapes)
- * - POSTs create using the **new schema first** at /custom-menus/companies/{companyId}
- *   (with icon + showOn* booleans), trying multiple openMode candidates
- * - Falls back to the legacy schema at /custom-menus/ if needed
+ * Behavior aligned to current LC routers:
+ * - LIST via GET /custom-menus?companyId=...
+ * - CREATE via POST /custom-menus (base endpoint) **new schema** with companyId in body
+ * - Try openMode "IN_APP" first, then omit openMode if validator rejects it
+ * - No legacy payload (placement/visibility/IFRAME) – those cause 422 in current envs
  */
 async function ensureCml(accessToken: string, companyId: string, tokenScopes: string[]) {
   const base = ghlCustomMenusBase();
@@ -54,12 +53,13 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
     return { ok: r.ok, status: r.status, bodyText: text, json };
   };
 
-  // list with query param first; if 404 try the nested path
+  // List (preferred shape)
   const listQueryUrl = `${base}?companyId=${encodeURIComponent(companyId)}`;
-  const listNestedUrl = `${base}companies/${encodeURIComponent(companyId)}`;
-
   let listResp = await tryList(listQueryUrl);
+
+  // Some older routers only expose nested read; try as a fallback (best-effort)
   if (!listResp.ok && listResp.status === 404) {
+    const listNestedUrl = `${base}companies/${encodeURIComponent(companyId)}`;
     olog("ensureCml list 404; retrying alternate", { url: listNestedUrl });
     listResp = await tryList(listNestedUrl);
   }
@@ -81,63 +81,93 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
     // continue to create anyway
   }
 
-  // NEW API: create at /custom-menus/companies/{companyId}
-  // Required fields per validator errors: icon, showOnCompany, showOnLocation, showToAllLocations
-  // openMode is validated; we try a handful of candidates.
-  const newCreateUrl = listNestedUrl; // same nested base
+  // NEW SCHEMA on BASE ENDPOINT:
+  // POST /custom-menus
+  // Required by validator: icon, showOnCompany, showOnLocation, showToAllLocations
+  // Include companyId in body for base endpoint
+  const createUrl = base;
 
+  // Common body (openMode added per-attempt)
   const newBodyBase = {
+    companyId, // IMPORTANT for base endpoint
     title: "Driving for Dollars",
     url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
-    icon: { type: "EMOJI", value: "🚗" }, // minimal valid icon object
+    icon: { type: "EMOJI", value: "🚗" },
     showOnCompany: false,
     showOnLocation: true,
     showToAllLocations: true,
   };
 
-  for (const mode of CML_OPEN_MODE_CANDIDATES) {
-    const body = { ...newBodyBase, openMode: mode };
-    const r = await fetch(newCreateUrl, {
+  // Try with "IN_APP" (commonly accepted), then WITHOUT openMode (some routers reject all custom values)
+  const openModeAttempts = ["IN_APP", null] as const;
+
+  for (const mode of openModeAttempts) {
+    const body = mode ? { ...newBodyBase, openMode: mode } : { ...newBodyBase };
+    const r = await fetch(createUrl, {
+      method: "POST",
+      headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const t = await r.text().catch(() => "");
+
+    if (r.ok) {
+      olog("ensureCml create success", { openModeUsed: mode ?? "(omitted)" });
+      return;
+    }
+
+    // If this is a hard 404 here, it likely means this router only supports nested creates (rare).
+    // Log and continue loop to try the alternate path below.
+    olog("ensureCml base-create attempt failed", {
+      openModeTried: mode ?? "(omitted)",
+      status: r.status,
+      sample: t.slice(0, 500),
+    });
+
+    // If 422 and message complains about unknown openMode, the next iteration (omitting openMode) will handle it.
+    // Otherwise we'll try nested create next.
+  }
+
+  // LAST RESORT: some tenants expose nested create. Try it with the NEW SCHEMA (no legacy fields).
+  // POST /custom-menus/companies/{companyId}
+  const nestedCreateUrl = `${base}companies/${encodeURIComponent(companyId)}`;
+  for (const mode of openModeAttempts) {
+    const body = mode
+      ? {
+          ...newBodyBase,
+          // remove companyId for nested
+          companyId: undefined,
+          openMode: mode,
+        }
+      : {
+          ...newBodyBase,
+          companyId: undefined,
+        };
+
+    const r = await fetch(nestedCreateUrl, {
       method: "POST",
       headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const t = await r.text().catch(() => "");
     if (r.ok) {
-      olog("ensureCml new-create success", { openModeTried: mode });
+      olog("ensureCml nested-create success", { openModeUsed: mode ?? "(omitted)" });
       return;
     }
-    olog("ensureCml new-create attempt failed", {
-      openModeTried: mode,
+    olog("ensureCml nested-create attempt failed", {
+      openModeTried: mode ?? "(omitted)",
       status: r.status,
       sample: t.slice(0, 500),
     });
 
-    // If it's a hard 404 on the nested route, no point trying further modes there.
-    if (r.status === 404) break;
+    if (r.status === 404) {
+      // If nested is 404 too, there's nothing else to try.
+      // (Do not fall back to legacy payloads – current validator rejects them.)
+      continue;
+    }
   }
 
-  // LEGACY fallback (older docs): POST to /custom-menus/ with legacy fields
-  const legacyCreateUrl = base; // NOTE: trailing slash retained
-  const legacyBody = {
-    title: "Driving for Dollars",
-    url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
-    placement: "LEFT_SIDEBAR",
-    openMode: "IFRAME",
-    visibility: { agency: false, subAccount: true },
-  };
-
-  const legacy = await fetch(legacyCreateUrl, {
-    method: "POST",
-    headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
-    body: JSON.stringify(legacyBody),
-  });
-  if (!legacy.ok) {
-    const lt = await legacy.text().catch(() => "");
-    olog("CML create failed", { status: legacy.status, body: (lt || "").slice(0, 500) });
-  } else {
-    olog("ensureCml legacy-create success");
-  }
+  // If we got here, creation failed in all shapes.
+  olog("CML create failed", { status: 0, body: "exhausted all create strategies (base + nested, with/without openMode)" });
 }
 
 export async function GET(request: Request) {
