@@ -89,17 +89,17 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
 
   // Common body (openMode added per-attempt)
   const newBodyBase = {
-    companyId, // IMPORTANT for base endpoint
     title: "Driving for Dollars",
     url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
-    icon: { type: "EMOJI", value: "🚗" },
+    icon: { name: "car", fontFamily: "lucide" },
+    userRole: "all" as const,               // required: all | admin | user
     showOnCompany: false,
     showOnLocation: true,
     showToAllLocations: true,
   };
 
-  // Try with "IN_APP" (commonly accepted), then WITHOUT openMode (some routers reject all custom values)
-  const openModeAttempts = ["IN_APP", null] as const;
+  // Use the lowercase enum accepted by the current validator
+  const openModeAttempts = ["iframe", "current_tab"] as const;
 
   for (const mode of openModeAttempts) {
     const body = mode ? { ...newBodyBase, openMode: mode } : { ...newBodyBase };
@@ -118,10 +118,11 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
     // If this is a hard 404 here, it likely means this router only supports nested creates (rare).
     // Log and continue loop to try the alternate path below.
     olog("ensureCml base-create attempt failed", {
-      openModeTried: mode ?? "(omitted)",
+      openModeTried: mode,
       status: r.status,
       sample: t.slice(0, 500),
     });
+
 
     // If 422 and message complains about unknown openMode, the next iteration (omitting openMode) will handle it.
     // Otherwise we'll try nested create next.
@@ -131,23 +132,14 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
   // POST /custom-menus/companies/{companyId}
   const nestedCreateUrl = `${base}companies/${encodeURIComponent(companyId)}`;
   for (const mode of openModeAttempts) {
-    const body = mode
-      ? {
-          ...newBodyBase,
-          // remove companyId for nested
-          companyId: undefined,
-          openMode: mode,
-        }
-      : {
-          ...newBodyBase,
-          companyId: undefined,
-        };
+    const body = { ...newBodyBase, openMode: mode };
 
     const r = await fetch(nestedCreateUrl, {
       method: "POST",
       headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+
     const t = await r.text().catch(() => "");
     if (r.ok) {
       olog("ensureCml nested-create success", { openModeUsed: mode ?? "(omitted)" });
