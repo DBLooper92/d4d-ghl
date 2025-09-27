@@ -1,338 +1,469 @@
 // File: src/app/api/oauth/callback/route.ts
 import { NextResponse } from "next/server";
-import { ghlTokenUrl } from "@/lib/ghl";
+import { cookies, headers } from "next/headers";
+import { db } from "@/lib/firebaseAdmin";
+import {
+  getGhlConfig,
+  ghlTokenUrl,
+  lcHeaders,
+  OAuthTokens,
+  olog,
+  LCListLocationsResponse,
+  pickLocs,
+  safeId,
+  safeInstalled,
+  safeName,
+  ghlInstalledLocationsUrl,
+  ghlCompanyLocationsUrl,
+  ghlMintLocationTokenUrl,
+  ghlCustomMenusBase,
+  CML_SCOPES,
+  scopeListFromTokenScope,
+  CustomMenuListResponse,
+} from "@/lib/ghl";
+import { FieldValue } from "firebase-admin/firestore";
 
-export const runtime = "nodejs";
+export const runtime = "nodejs"; // Node APIs for crypto/cookies
 
-// ====== Types ======
-type UserRole = "all" | "admin" | "user";
-type OpenMode = "iframe" | "current_tab";
+/**
+ * Ensure a Custom Menu Link exists for this agency.
+ * Router quirks handled:
+ * - LIST via GET /custom-menus?companyId=...
+ * - CREATE via POST /custom-menus (base endpoint) with new schema
+ *   required booleans + allowCamera/allowMicrophone
+ *   icon as { name, fontFamily } (try a few families)
+ *   userRole: try "all" then "admin"/"user"
+ *   openMode: try "iframe" then "current_tab"
+ * - LAST RESORT: nested POST /custom-menus/companies/{companyId} with same schema (many tenants 404 here)
+ */
+async function ensureCml(accessToken: string, companyId: string, tokenScopes: string[]) {
+  const base = ghlCustomMenusBase();
 
-type CustomMenuLink = {
-  id?: string;
-  title: string;
-  url: string;
-  userRole?: UserRole;
-  openMode?: OpenMode;
-  allowCamera?: boolean;
-  allowMicrophone?: boolean;
-};
+  const hasRead = tokenScopes.includes(CML_SCOPES.READ);
+  const hasWrite = tokenScopes.includes(CML_SCOPES.WRITE);
 
-type TokenResponse = {
-  access_token: string;
-  token_type: string;
-  refresh_token?: string;
-  expires_in?: number;
-  scope?: string;
-  locationId?: string | null;
-  companyId?: string | null; // agency/company
-};
+  olog("ensureCml precheck", { companyId, hasWrite, hasRead });
+  if (!hasRead || !hasWrite) return;
 
-// ====== Small utilities ======
-const json = (o: unknown) => JSON.stringify(o);
-const log = (msg: string, meta?: unknown) => (meta ? console.log(msg, json(meta)) : console.log(msg));
-const errlog = (msg: string, meta?: unknown) => (meta ? console.error(msg, json(meta)) : console.error(msg));
-
-const lcHeaders = (accessToken: string): HeadersInit => ({
-  Authorization: `Bearer ${accessToken}`,
-  "Content-Type": "application/json",
-  Accept: "application/json",
-  Version: "2021-07-28",
-});
-
-async function fetchWithBody(
-  url: string,
-  init: RequestInit
-): Promise<{ ok: boolean; status: number; bodyText: string; json: unknown }> {
-  const r = await fetch(url, init);
-  const bodyText = await r.text().catch(() => "");
-  let parsed: unknown = null;
-  try {
-    parsed = bodyText ? JSON.parse(bodyText) : null;
-  } catch {
-    parsed = null;
-  }
-  return { ok: r.ok, status: r.status, bodyText, json: parsed };
-}
-
-function toMenuList(r: unknown): CustomMenuLink[] {
-  if (Array.isArray(r)) return r as CustomMenuLink[];
-  if (r && typeof r === "object") {
-    const maybe = r as { items?: unknown };
-    if (Array.isArray(maybe.items)) return maybe.items as CustomMenuLink[];
-  }
-  return [];
-}
-
-// ====== Config loader (NO throws at import time, supports both env name styles) ======
-function loadOauthConfig() {
-  // Primary (your current setup via apphosting.yaml)
-  let clientId = process.env.GHL_CLIENT_ID ?? "";
-  let clientSecret = process.env.GHL_CLIENT_SECRET ?? "";
-  const baseApp = process.env.NEXT_PUBLIC_APP_BASE_URL || "http://localhost:3000";
-  const redirectPath = process.env.GHL_REDIRECT_PATH || "/api/oauth/callback";
-  let redirectUri = `${baseApp}${redirectPath}`;
-
-  // Fallback to legacy names if present (in case secrets are set under old keys)
-  if (!clientId || !clientSecret) {
-    clientId = process.env.GHL_OAUTH_CLIENT_ID ?? clientId;
-    clientSecret = process.env.GHL_OAUTH_CLIENT_SECRET ?? clientSecret;
-    redirectUri = process.env.GHL_OAUTH_REDIRECT_URI || redirectUri;
-  }
-
-  return { clientId: String(clientId || ""), clientSecret: String(clientSecret || ""), baseApp, redirectUri };
-}
-
-// Compute CML URL without importing other helpers (avoid early env access)
-const CML_TITLE = "Driving for Dollars";
-const CML_URL = `${process.env.NEXT_PUBLIC_APP_BASE_URL || "http://localhost:3000"}/app`;
-
-// ====== OAuth exchange (uses the loader above) ======
-async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
-  const { clientId, clientSecret, redirectUri } = loadOauthConfig();
-
-  // Hard fail (don’t send an empty POST that yields 422)
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      `Missing OAuth creds at runtime: hasClientId=${Boolean(clientId)} hasClientSecret=${Boolean(
-        clientSecret
-      )} redirectUri=${redirectUri}`
-    );
-  }
-
-  log("[oauth] token exchange start", {
-    hasClientId: true,
-    hasClientSecret: true,
-    redirectUri,
-  });
-
-  const form = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: redirectUri,
-  });
-
-  const res = await fetchWithBody(ghlTokenUrl(), {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: form.toString(),
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    throw new Error(
-      `Token exchange failed (${res.status}): ${res.bodyText || (res.json ? json(res.json) : "")}`
-    );
-  }
-
-  return res.json as TokenResponse;
-}
-
-// ====== Identify install target ======
-type WhoAmIResponse = {
-  locationId?: string | null;
-  companyId?: string | null;
-};
-
-const GHL_API_BASE = "https://services.leadconnectorhq.com";
-
-async function whoAmI(accessToken: string): Promise<WhoAmIResponse> {
-  const url = `${GHL_API_BASE}/oauth/userinfo`;
-  const res = await fetchWithBody(url, {
-    method: "GET",
-    headers: lcHeaders(accessToken),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`userinfo failed (${res.status})`);
-  return (res.json || {}) as WhoAmIResponse;
-}
-
-async function deriveInstallTarget(
-  accessToken: string
-): Promise<{ agencyId: string | null; locationId: string | null }> {
-  const info = await whoAmI(accessToken);
-  return {
-    agencyId: info.companyId ?? null,
-    locationId: info.locationId ?? null,
+  // helper: GET menus for a given URL
+  const tryList = async (url: string) => {
+    const r = await fetch(url, { headers: lcHeaders(accessToken), cache: "no-store" });
+    const text = await r.text().catch(() => "");
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      /* not JSON */
+    }
+    return { ok: r.ok, status: r.status, bodyText: text, json };
   };
-}
 
-// ====== CML handlers ======
-async function listCmls(
-  accessToken: string,
-  scope: { agencyId?: string | null; locationId?: string | null }
-): Promise<CustomMenuLink[]> {
-  const qs = new URLSearchParams();
-  if (scope.agencyId) qs.set("companyId", scope.agencyId);
-  if (scope.locationId) qs.set("locationId", scope.locationId);
+  // List (preferred shape)
+  const listQueryUrl = `${base}?companyId=${encodeURIComponent(companyId)}`;
+  let listResp = await tryList(listQueryUrl);
 
-  const url = `${GHL_API_BASE}/custom-menu-links?${qs.toString()}`;
-
-  const attempt = await fetchWithBody(url, {
-    method: "GET",
-    headers: lcHeaders(accessToken),
-    cache: "no-store",
-  });
-
-  if (!attempt.ok) {
-    log("[oauth] CML list non-OK", { status: attempt.status, sample: attempt.bodyText });
-    return [];
+  // Some older routers only expose nested read; try as a fallback (best-effort)
+  if (!listResp.ok && listResp.status === 404) {
+    const listNestedUrl = `${base}companies/${encodeURIComponent(companyId)}`;
+    olog("ensureCml list 404; retrying alternate", { url: listNestedUrl });
+    listResp = await tryList(listNestedUrl);
   }
 
-  return toMenuList(attempt.json);
-}
+  if (listResp.ok) {
+    const payload = listResp.json as CustomMenuListResponse | null;
+    const menus = payload
+      ? Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload.items)
+          ? payload.items
+          : []
+      : [];
+    const exists = menus.some(
+      (m) =>
+        (m.title || "").toLowerCase() === "driving for dollars" &&
+        typeof m.url === "string" &&
+        m.url.startsWith("https://app.driving4dollars.co/app")
+    );
+    if (exists) return; // already present
+  } else {
+    olog("ensureCml list failed", { status: listResp.status, sample: (listResp.bodyText || "").slice(0, 400) });
+    // continue to create anyway
+  }
 
-async function createCml(
-  accessToken: string,
-  scope: { agencyId?: string | null; locationId?: string | null }
-): Promise<boolean> {
-  const commonBody: Omit<CustomMenuLink, "id"> & {
-    companyId?: string;
-    locationId?: string;
-  } = {
-    title: CML_TITLE,
-    url: `${CML_URL}?installed=1${scope.agencyId ? `&agencyId=${scope.agencyId}` : ""}${
-      scope.locationId ? `&locationId=${scope.locationId}` : ""
-    }`,
-    userRole: "all",
-    openMode: "iframe",
+  // ── Create attempts on BASE endpoint ────────────────────────────────────────
+  const createUrl = base;
+
+  // Try several icon families/names that commonly exist across tenants
+  const iconAttempts = [
+    { fontFamily: "lucide", name: "car" },
+    { fontFamily: "fontAwesome", name: "car" },
+    { fontFamily: "material", name: "directions_car" },
+    { fontFamily: "remix", name: "car-fill" },
+    { fontFamily: "lineawesome", name: "car" },
+  ] as const;
+
+  const userRoleAttempts = ["all", "admin", "user"] as const;
+  const openModeAttempts = ["iframe", "current_tab"] as const;
+
+  // Base (shared) fields required by validator
+  const baseFields = {
+    title: "Driving for Dollars",
+    url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
+    showOnCompany: false,
+    showOnLocation: true,
+    showToAllLocations: true,
     allowCamera: false,
     allowMicrophone: false,
-    ...(scope.agencyId ? { companyId: scope.agencyId } : {}),
-    ...(scope.locationId ? { locationId: scope.locationId } : {}),
   };
 
-  // A) base endpoint
-  {
-    const url = `${GHL_API_BASE}/custom-menu-links`;
-    const res = await fetchWithBody(url, {
-      method: "POST",
-      headers: lcHeaders(accessToken),
-      body: JSON.stringify(commonBody),
-      cache: "no-store",
-    });
+  // Try a small matrix: icon × userRole × openMode
+  for (const icon of iconAttempts) {
+    let iconWorked = false;
+    for (const userRole of userRoleAttempts) {
+      for (const mode of openModeAttempts) {
+        const body = { ...baseFields, icon, userRole, openMode: mode };
+        const r = await fetch(createUrl, {
+          method: "POST",
+          headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const t = await r.text().catch(() => "");
 
-    if (res.ok) return true;
+        if (r.ok) {
+          olog("ensureCml create success", { icon, userRole, openModeUsed: mode });
+          return;
+        }
 
-    log("[oauth] ensureCml base-create attempt failed", { status: res.status, sample: res.bodyText });
+        olog("ensureCml base-create attempt failed", {
+          icon,
+          userRole,
+          openModeTried: mode,
+          status: r.status,
+          sample: t.slice(0, 500),
+        });
+
+        if (r.status === 422 && /font family/i.test(t)) {
+          // current icon family rejected; move to next icon
+          iconWorked = false;
+          break;
+        }
+        // otherwise continue trying other combinations
+      }
+      if (iconWorked) break;
+    }
+    // proceed to next iconAttempt
   }
 
-  // B) nested company endpoint
-  if (scope.agencyId) {
-    const url = `${GHL_API_BASE}/custom-menu-links/companies/${encodeURIComponent(scope.agencyId)}`;
-    const body = {
-      title: commonBody.title,
-      url: commonBody.url,
-      userRole: commonBody.userRole,
-      openMode: commonBody.openMode,
-      allowCamera: commonBody.allowCamera,
-      allowMicrophone: commonBody.allowMicrophone,
-    };
-
-    const res = await fetchWithBody(url, {
-      method: "POST",
-      headers: lcHeaders(accessToken),
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-
-    if (res.ok) return true;
-
-    log("[oauth] ensureCml nested-create attempt failed", { status: res.status, sample: res.bodyText });
+  // ── LAST RESORT: nested create with same schema (many tenants 404 here) ────
+  const nestedCreateUrl = `${base}companies/${encodeURIComponent(companyId)}`;
+  for (const icon of iconAttempts) {
+    let iconWorked = false;
+    for (const userRole of userRoleAttempts) {
+      for (const mode of openModeAttempts) {
+        const body = { ...baseFields, icon, userRole, openMode: mode };
+        const r = await fetch(nestedCreateUrl, {
+          method: "POST",
+          headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const t = await r.text().catch(() => "");
+        if (r.ok) {
+          olog("ensureCml nested-create success", { icon, userRole, openModeUsed: mode });
+          return;
+        }
+        olog("ensureCml nested-create attempt failed", {
+          icon,
+          userRole,
+          openModeTried: mode,
+          status: r.status,
+          sample: t.slice(0, 500),
+        });
+        if (r.status === 422 && /font family/i.test(t)) {
+          iconWorked = false;
+          break;
+        }
+      }
+      if (iconWorked) break;
+    }
   }
 
-  // C) nested location endpoint
-  if (scope.locationId) {
-    const url = `${GHL_API_BASE}/custom-menu-links/locations/${encodeURIComponent(scope.locationId)}`;
-    const body = {
-      title: commonBody.title,
-      url: commonBody.url,
-      userRole: commonBody.userRole,
-      openMode: commonBody.openMode,
-      allowCamera: commonBody.allowCamera,
-      allowMicrophone: commonBody.allowMicrophone,
-    };
-
-    const res = await fetchWithBody(url, {
-      method: "POST",
-      headers: lcHeaders(accessToken),
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-
-    if (res.ok) return true;
-
-    log("[oauth] ensureCml nested-create attempt failed", { status: res.status, sample: res.bodyText });
-  }
-
-  log("[oauth] CML create failed", { status: 0, body: "exhausted strategies" });
-  return false;
+  // If we got here, creation failed in all shapes.
+  olog("CML create failed", { status: 0, body: "exhausted all create strategies (base + nested) with icon/userRole/openMode matrix" });
 }
 
-async function ensureCml(accessToken: string, agencyId: string | null, locationId: string | null) {
-  log("[oauth] ensureCml precheck", { companyId: agencyId, hasWrite: true, hasRead: true });
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code") || "";
 
-  const existing = await listCmls(accessToken, { agencyId, locationId });
-  const exists = existing.some((m: CustomMenuLink) => {
-    const title = (m.title || "").toLowerCase();
-    return title === CML_TITLE.toLowerCase() && typeof m.url === "string" && m.url.startsWith(CML_URL);
-  });
-  if (exists) return true;
+  const userTypeQueryRaw = url.searchParams.get("user_type") || url.searchParams.get("userType") || "";
+  const userTypeForToken =
+    userTypeQueryRaw.toLowerCase() === "location"
+      ? ("Location" as const)
+      : userTypeQueryRaw.toLowerCase() === "company"
+        ? ("Company" as const)
+        : undefined;
 
-  return await createCml(accessToken, { agencyId, locationId });
-}
+  const state = url.searchParams.get("state") || "";
+  const [nonce, rtB64] = state ? state.split("|") : ["", ""];
 
-// ====== Route handler ======
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const code = url.searchParams.get("code");
+  const ck = await cookies();
+  const cookieNonce = ck.get("d4d_oauth_state")?.value || "";
+
+  const hdrs = await headers();
+  const referer = hdrs.get("referer") || "";
+  const fromGhl = /gohighlevel\.com|leadconnector/i.test(referer);
+  if (state) {
+    if (!cookieNonce || cookieNonce !== nonce) {
+      olog("state mismatch", { hasCookie: !!cookieNonce, nonceIn: !!nonce });
+      return NextResponse.json({ error: "Invalid state" }, { status: 400 });
+    }
+  } else if (!fromGhl) {
+    return NextResponse.json({ error: "Invalid state" }, { status: 400 });
+  }
 
   if (!code) {
-    return NextResponse.json({ error: "Missing OAuth code" }, { status: 400 });
+    return NextResponse.json({ error: "Missing code" }, { status: 400 });
   }
 
+  const { clientId, clientSecret, redirectUri, baseApp, integrationId } = getGhlConfig();
+
+  // 1) Exchange code → tokens
+  const form = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+  });
+  if (userTypeForToken) form.set("user_type", userTypeForToken);
+
+  const tokenResp = await fetch(ghlTokenUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: form,
+  });
+
+  const raw = await tokenResp.text();
+  if (!tokenResp.ok) {
+    olog("token exchange failed", { status: tokenResp.status, raw: raw.slice(0, 400) });
+    return NextResponse.json({ error: "Token exchange failed" }, { status: 502 });
+  }
+
+  let tokens: OAuthTokens;
   try {
-    // Quick visibility on env presence in logs (no secrets printed)
-    const cfg = loadOauthConfig();
-    log("[oauth] cfg snapshot", {
-      hasClientId: Boolean(cfg.clientId),
-      hasClientSecret: Boolean(cfg.clientSecret),
-      redirectUri: cfg.redirectUri,
-    });
+    tokens = JSON.parse(raw) as OAuthTokens;
+  } catch {
+    return NextResponse.json({ error: "Bad token JSON" }, { status: 502 });
+  }
 
-    const token = await exchangeCodeForToken(code);
+  const agencyId = tokens.companyId || null;
+  const locationId = tokens.locationId || null;
+  const scopeArr = scopeListFromTokenScope(tokens.scope);
 
-    const accessToken = token.access_token;
-    log("[oauth] token snapshot", {
-      hasCompanyId: Boolean(token.companyId),
-      hasLocationId: Boolean(token.locationId),
-    });
+  olog("token snapshot", {
+    userTypeForToken: userTypeForToken ?? "(none)",
+    hasCompanyId: !!agencyId,
+    hasLocationId: !!locationId,
+  });
 
-    const target = await deriveInstallTarget(accessToken);
+  type InstallationTarget = "Company" | "Location";
+  const installationTarget: InstallationTarget = locationId ? "Location" : "Company";
 
-    const installedLocations = target.locationId ? 1 : 0;
-    log("[oauth] installedLocations discovered", { count: installedLocations });
+  // 2) Upsert agency
+  if (agencyId) {
+    const agenciesRef = db().collection("agencies").doc(agencyId);
+    const snap = await agenciesRef.get();
+    const isNewAgency = !snap.exists;
 
-    const ok = await ensureCml(accessToken, target.agencyId, target.locationId);
-    if (!ok) {
-      // proceed anyway; logging captures why
-    }
-
-    const redirectQs = new URLSearchParams({
-      installed: "1",
-      ...(target.agencyId ? { agencyId: target.agencyId } : {}),
-      ...(target.locationId ? { locationId: target.locationId } : {}),
-    });
-
-    const appUrl = `${cfg.baseApp}/app?${redirectQs.toString()}`;
-    return NextResponse.redirect(appUrl, { status: 302 });
-  } catch (e) {
-    errlog("[oauth] callback error", { message: (e as Error).message });
-    return NextResponse.json(
-      { error: "OAuth callback failed", detail: (e as Error).message },
-      { status: 500 }
+    await agenciesRef.set(
+      {
+        agencyId,
+        provider: "leadconnector",
+        scopes: scopeArr,
+        ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
+        installedAt: isNewAgency ? FieldValue.serverTimestamp() : snap.get("installedAt") ?? FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
     );
   }
+
+  // 3) If Location install, persist that single location
+  if (agencyId && locationId) {
+    await db().collection("locations").doc(locationId).set(
+      {
+        locationId,
+        agencyId,
+        provider: "leadconnector",
+        ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
+        isInstalled: true,
+        name: null,
+        installedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    await db()
+      .collection("agencies")
+      .doc(agencyId)
+      .collection("locations")
+      .doc(locationId)
+      .set(
+        {
+          locationId,
+          agencyId,
+          name: null,
+          installedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+  }
+
+  // 4) Company-level discovery + mint per-location tokens (best effort)
+  try {
+    if (agencyId && installationTarget === "Company") {
+      let locs: Array<{ id: string; name: string | null; isInstalled: boolean }> = [];
+      if (integrationId) {
+        try {
+          const r = await fetch(ghlInstalledLocationsUrl(agencyId, integrationId), {
+            headers: lcHeaders(tokens.access_token),
+          });
+          if (r.ok) {
+            const data = (await r.json()) as LCListLocationsResponse;
+            const arr = pickLocs(data);
+            locs = arr
+              .map((e) => ({ id: safeId(e), name: safeName(e), isInstalled: safeInstalled(e) }))
+              .filter((x): x is { id: string; name: string | null; isInstalled: boolean } => !!x.id);
+            olog("installedLocations discovered", { count: locs.length });
+          } else {
+            olog("installedLocations failed, will fallback", { status: r.status, body: await r.text().catch(() => "") });
+          }
+        } catch (e) {
+          olog("installedLocations error, will fallback", { err: String(e) });
+        }
+      }
+
+      if (!locs.length) {
+        const limit = 200;
+        for (let page = 1; page < 999; page++) {
+          const r = await fetch(ghlCompanyLocationsUrl(agencyId, page, limit), {
+            headers: lcHeaders(tokens.access_token),
+          });
+          if (!r.ok) break;
+
+          const j = (await r.json()) as LCListLocationsResponse;
+          const arr = pickLocs(j);
+
+          for (const e of arr) {
+            const id = safeId(e);
+            if (!id) continue;
+            locs.push({ id, name: safeName(e), isInstalled: safeInstalled(e) });
+          }
+          if (arr.length < limit) break;
+        }
+        olog("company locations fallback", { count: locs.length });
+      }
+
+      const batch = db().batch();
+      const now = FieldValue.serverTimestamp();
+
+      for (const l of locs) {
+        const locRef = db().collection("locations").doc(l.id);
+        batch.set(
+          locRef,
+          {
+            locationId: l.id,
+            agencyId,
+            provider: "leadconnector",
+            name: l.name ?? null,
+            isInstalled: Boolean(l.isInstalled),
+            installedAt: now,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+
+        const agencyLocRef = db().collection("agencies").doc(agencyId).collection("locations").doc(l.id);
+        batch.set(
+          agencyLocRef,
+          {
+            locationId: l.id,
+            agencyId,
+            name: l.name ?? null,
+            installedAt: now,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      }
+      await batch.commit();
+
+      for (const l of locs) {
+        try {
+          const resp = await fetch(ghlMintLocationTokenUrl(), {
+            method: "POST",
+            headers: { ...lcHeaders(tokens.access_token), "Content-Type": "application/json" },
+            body: JSON.stringify({ companyId: agencyId, locationId: l.id }),
+          });
+          if (!resp.ok) {
+            const errTxt = await resp.text().catch(() => "");
+            olog("mint failed", { locationId: l.id, status: resp.status, body: errTxt.slice(0, 300) });
+            continue;
+          }
+
+          const body = (await resp.json()) as {
+            data?: { refresh_token?: string };
+            refresh_token?: string;
+          };
+
+          const mintedRefresh = body?.data?.refresh_token ?? body?.refresh_token ?? "";
+          if (!mintedRefresh) {
+            olog("mint missing refresh_token", { locationId: l.id });
+            continue;
+          }
+
+          await db().collection("locations").doc(l.id).set(
+            {
+              refreshToken: mintedRefresh,
+              isInstalled: true,
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+        } catch (e) {
+          olog("mint error (non-fatal)", { locationId: l.id, err: String(e) });
+        }
+      }
+    }
+  } catch (e) {
+    olog("location discovery/mint error", { message: (e as Error).message });
+  }
+
+  // 4.5) Ensure the Custom Menu Link exists for this agency (idempotent)
+  if (agencyId) {
+    try {
+      await ensureCml(tokens.access_token, agencyId, scopeArr);
+    } catch (e) {
+      olog("ensureCml error (non-fatal)", { err: String(e) });
+    }
+  }
+
+  // 5) Redirect back to UI
+  const returnTo = rtB64 ? Buffer.from(rtB64, "base64url").toString("utf8") : `${baseApp}/app`;
+  const ui = new URL(returnTo);
+  ui.searchParams.set("installed", "1");
+  if (agencyId) ui.searchParams.set("agencyId", agencyId);
+  if (locationId) ui.searchParams.set("locationId", locationId);
+
+  olog("oauth success", {
+    userTypeQuery: userTypeForToken ?? "",
+    derivedInstallTarget: installationTarget,
+    agencyId,
+    locationId,
+    scopes: scopeArr.slice(0, 8),
+  });
+
+  return NextResponse.redirect(ui.toString(), { status: 302 });
 }
