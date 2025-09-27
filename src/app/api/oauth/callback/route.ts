@@ -27,11 +27,14 @@ export const runtime = "nodejs"; // Node APIs for crypto/cookies
 
 /**
  * Ensure a Custom Menu Link exists for this agency.
- * Behavior aligned to current LC routers:
+ * Router quirks handled:
  * - LIST via GET /custom-menus?companyId=...
- * - CREATE via POST /custom-menus (base endpoint) **new schema** with companyId in body
- * - Try openMode "IN_APP" first, then omit openMode if validator rejects it
- * - No legacy payload (placement/visibility/IFRAME) – those cause 422 in current envs
+ * - CREATE via POST /custom-menus (base endpoint) with new schema
+ *   required booleans + allowCamera/allowMicrophone
+ *   icon as { name, fontFamily } (try a few families)
+ *   userRole: try "all" then "admin"/"user"
+ *   openMode: try "iframe" then "current_tab"
+ * - LAST RESORT: nested POST /custom-menus/companies/{companyId} with same schema (many tenants 404 here)
  */
 async function ensureCml(accessToken: string, companyId: string, tokenScopes: string[]) {
   const base = ghlCustomMenusBase();
@@ -49,7 +52,9 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
     let json: unknown = null;
     try {
       json = text ? JSON.parse(text) : null;
-    } catch { /* not JSON */ }
+    } catch {
+      /* not JSON */
+    }
     return { ok: r.ok, status: r.status, bodyText: text, json };
   };
 
@@ -67,7 +72,11 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
   if (listResp.ok) {
     const payload = listResp.json as CustomMenuListResponse | null;
     const menus = payload
-      ? Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : []
+      ? Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload.items)
+          ? payload.items
+          : []
       : [];
     const exists = menus.some(
       (m) =>
@@ -81,101 +90,118 @@ async function ensureCml(accessToken: string, companyId: string, tokenScopes: st
     // continue to create anyway
   }
 
-  // NEW SCHEMA on BASE ENDPOINT:
-  // POST /custom-menus
-  // Required by validator: icon, showOnCompany, showOnLocation, showToAllLocations
-  // Include companyId in body for base endpoint
+  // ── Create attempts on BASE endpoint ────────────────────────────────────────
   const createUrl = base;
 
-  // Common body (openMode added per-attempt)
-  const newBodyBase = {
+  // Try several icon families/names that commonly exist across tenants
+  const iconAttempts = [
+    { fontFamily: "lucide", name: "car" },
+    { fontFamily: "fontAwesome", name: "car" },
+    { fontFamily: "material", name: "directions_car" },
+    { fontFamily: "remix", name: "car-fill" },
+    { fontFamily: "lineawesome", name: "car" },
+  ] as const;
+
+  const userRoleAttempts = ["all", "admin", "user"] as const;
+  const openModeAttempts = ["iframe", "current_tab"] as const;
+
+  // Base (shared) fields required by validator
+  const baseFields = {
     title: "Driving for Dollars",
     url: "https://app.driving4dollars.co/app?location_id={{location.id}}",
-    icon: { name: "car", fontFamily: "lucide" },
-    userRole: "all" as const,               // required: all | admin | user
     showOnCompany: false,
     showOnLocation: true,
     showToAllLocations: true,
+    allowCamera: false,
+    allowMicrophone: false,
   };
 
-  // Use the lowercase enum accepted by the current validator
-  const openModeAttempts = ["iframe", "current_tab"] as const;
+  // Try a small matrix: icon × userRole × openMode
+  for (const icon of iconAttempts) {
+    let iconWorked = false;
+    for (const userRole of userRoleAttempts) {
+      for (const mode of openModeAttempts) {
+        const body = { ...baseFields, icon, userRole, openMode: mode };
+        const r = await fetch(createUrl, {
+          method: "POST",
+          headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const t = await r.text().catch(() => "");
 
-  for (const mode of openModeAttempts) {
-    const body = mode ? { ...newBodyBase, openMode: mode } : { ...newBodyBase };
-    const r = await fetch(createUrl, {
-      method: "POST",
-      headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const t = await r.text().catch(() => "");
+        if (r.ok) {
+          olog("ensureCml create success", { icon, userRole, openModeUsed: mode });
+          return;
+        }
 
-    if (r.ok) {
-      olog("ensureCml create success", { openModeUsed: mode ?? "(omitted)" });
-      return;
+        olog("ensureCml base-create attempt failed", {
+          icon,
+          userRole,
+          openModeTried: mode,
+          status: r.status,
+          sample: t.slice(0, 500),
+        });
+
+        if (r.status === 422 && /font family/i.test(t)) {
+          // current icon family rejected; move to next icon
+          iconWorked = false;
+          break;
+        }
+        // otherwise continue trying other combinations
+      }
+      if (iconWorked) break;
     }
-
-    // If this is a hard 404 here, it likely means this router only supports nested creates (rare).
-    // Log and continue loop to try the alternate path below.
-    olog("ensureCml base-create attempt failed", {
-      openModeTried: mode,
-      status: r.status,
-      sample: t.slice(0, 500),
-    });
-
-
-    // If 422 and message complains about unknown openMode, the next iteration (omitting openMode) will handle it.
-    // Otherwise we'll try nested create next.
+    // proceed to next iconAttempt
   }
 
-  // LAST RESORT: some tenants expose nested create. Try it with the NEW SCHEMA (no legacy fields).
-  // POST /custom-menus/companies/{companyId}
+  // ── LAST RESORT: nested create with same schema (many tenants 404 here) ────
   const nestedCreateUrl = `${base}companies/${encodeURIComponent(companyId)}`;
-  for (const mode of openModeAttempts) {
-    const body = { ...newBodyBase, openMode: mode };
-
-    const r = await fetch(nestedCreateUrl, {
-      method: "POST",
-      headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    const t = await r.text().catch(() => "");
-    if (r.ok) {
-      olog("ensureCml nested-create success", { openModeUsed: mode ?? "(omitted)" });
-      return;
-    }
-    olog("ensureCml nested-create attempt failed", {
-      openModeTried: mode ?? "(omitted)",
-      status: r.status,
-      sample: t.slice(0, 500),
-    });
-
-    if (r.status === 404) {
-      // If nested is 404 too, there's nothing else to try.
-      // (Do not fall back to legacy payloads – current validator rejects them.)
-      continue;
+  for (const icon of iconAttempts) {
+    let iconWorked = false;
+    for (const userRole of userRoleAttempts) {
+      for (const mode of openModeAttempts) {
+        const body = { ...baseFields, icon, userRole, openMode: mode };
+        const r = await fetch(nestedCreateUrl, {
+          method: "POST",
+          headers: { ...lcHeaders(accessToken), "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const t = await r.text().catch(() => "");
+        if (r.ok) {
+          olog("ensureCml nested-create success", { icon, userRole, openModeUsed: mode });
+          return;
+        }
+        olog("ensureCml nested-create attempt failed", {
+          icon,
+          userRole,
+          openModeTried: mode,
+          status: r.status,
+          sample: t.slice(0, 500),
+        });
+        if (r.status === 422 && /font family/i.test(t)) {
+          iconWorked = false;
+          break;
+        }
+      }
+      if (iconWorked) break;
     }
   }
 
   // If we got here, creation failed in all shapes.
-  olog("CML create failed", { status: 0, body: "exhausted all create strategies (base + nested, with/without openMode)" });
+  olog("CML create failed", { status: 0, body: "exhausted all create strategies (base + nested) with icon/userRole/openMode matrix" });
 }
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") || "";
 
-  const userTypeQueryRaw =
-    url.searchParams.get("user_type") ||
-    url.searchParams.get("userType") ||
-    "";
+  const userTypeQueryRaw = url.searchParams.get("user_type") || url.searchParams.get("userType") || "";
   const userTypeForToken =
     userTypeQueryRaw.toLowerCase() === "location"
       ? ("Location" as const)
       : userTypeQueryRaw.toLowerCase() === "company"
-      ? ("Company" as const)
-      : undefined;
+        ? ("Company" as const)
+        : undefined;
 
   const state = url.searchParams.get("state") || "";
   const [nonce, rtB64] = state ? state.split("|") : ["", ""];
